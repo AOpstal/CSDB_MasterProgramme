@@ -1,0 +1,1148 @@
+---
+title: "20241002_Macrophages_FACS_Analysis"
+author: "A. van Opstal"
+date: "2024-10-02"
+output: github_document
+---
+
+# High parameter flow cytometry analysis in R
+This script has been adapted from a tutorial from Vera Poort (van Boxtel group PMC) and Rico Hagelaar (van Boxtel group PMC). High parameter flow cytometry analysis using dimensional reduction algorithms.
+The original R-script for this processing and analysis was kindly provided by the Van Boxtel group (Princess Máxima Center for pediatric oncology) and is available here: https://github.com/ProjectsVanBox/TallFlow.
+.fcs files were processed as described in Poort, et al. 2024 (1).
+With the following adjustments:
+Ncell was adjusted to the amount of the condition with the lowest cells available.
+PCA was additionally coloured for Experiments/Donors and for treatment conditions to ensure no skewing happened based on Experiment/Donors if the same conditions were present in these experiments.
+Dimensional reduction using UMAP was the final step for our analysis as it was used for visualisation.
+For UMAP, n was increased, n_iter was decreased due to computational limitations, and n_threads was decreased to 1. 
+UMAP was additionally coloured for all conditions and all experiments/donors, for M0-, M1-, and M2-like macrophages, and each condition with M0-, M1-, and M2-like macrophages.   
+all created plots with colour were saved.
+
+
+1. Poort, V. M., Hagelaar, R., Roosmalen, M. J. van, Trabut, L., Buijs-Gladdines, J. G. C. A.
+M., Wijk, B. van, Meijerink, J. & Boxtel, R. van. (2024). Transient Differentiation-State
+Plasticity Occurs during Acute Lymphoblastic Leukemia Initiation. Cancer Research,
+84(16), 2720–2733. https://doi.org/10.1158/0008-5472.can-24-1090.
+
+
+
+# Data analysis
+### R Packages, Directory, startup.
+
+```{r load packages}
+# You can check if all the packages are installed and if you can read in the libraries without errors.
+
+library(flowCore)
+library(uwot)
+library(dplyr)
+library(magrittr)
+library(Rtsne)
+library(ggplot2)
+library(pheatmap)
+library(FNN)
+library(igraph)
+library(matrixStats)
+library(RColorBrewer)
+library(reshape2)
+library(FlowSOM)
+library(ConsensusClusterPlus)
+library(flowWorkspace)
+library(DescTools)
+library(factoextra)
+library(patchwork)
+
+library(tidyverse) 
+library("RSpectra")
+library("ComplexHeatmap")
+
+library(gridExtra)
+library(ggpubr)
+
+```
+
+
+```{r set directories packages}
+# set the working directory
+workdir <- "pathway to FlowCytometryWS1, which contains pre-created functions" # for tutorial related files
+workdir2 <- "pathway to .fcs FACS files folder, exported from FlowJo" # for generated Flow Cytometry files
+```
+
+### load functions written to prepare, analyse and visualize flow data. 
+Functions are stored in a separate R script, kindly provided by the Van Boxtel group (Princess Máxima Center for pediatric oncology) and is available here: https://github.com/ProjectsVanBox/TallFlow
+
+```{r load source functions}
+source(paste0(workdir,"FlowAnalysisFunctions.R"))
+
+```
+
+### load data
+Prior to loading FACS files manual gating is performed in FlowJo, 
+to exclude debris and select cells of interest for the analysis.
+This includes:
+- Time gate
+- Dead cells
+- Doublets
+Additionally the core macrophage populations were selected based on:
+- General macrophage markers CD11b, CD14, CD16, CD64
+- Homogeneous population of large size cells with large complexity
+
+### General settings
+```{r general settings}
+# number of cells per fcs file used in the analysis
+# this has been changed to ± the amount of cells present in the condition with the lowest amount of cells.
+ncell = 1100 
+
+# Set a seed for plotting
+set.seed(23)
+
+# conversion table from channels to markers which contains all the channels and all the markers
+channelmarkerconv <- read.csv(paste0(workdir2,"ChannelMarkerconv.csv"), header = TRUE, sep = ";")
+
+```
+
+
+## Data analysis of all FCS files
+### load pre-gated FCS data
+
+```{r load pre-gated fcs data}
+
+# load all files ending with .fcs from directory 
+fcsfiles <- list.files(paste0(workdir2), pattern = ".fcs", full.names = TRUE)
+# the following two files are to be excluded, BC20240227_Mn_SAOS/MSC, because by manual gating, all markers but CD64 and CD14 were ultranegative, thus they are unusable. 
+fcsfiles <- fcsfiles[!grepl("BC20240227_Mn_SAOS|BC20240227_Mn_MSC", fcsfiles)] # remove the two that are not wanted
+
+```
+
+
+```{r inspect list and create dataframe}
+#show the list and check it
+fcsfiles
+
+# Read FCS-file and create a dataframe 
+flowfiles.df <- {}  
+for (f in fcsfiles){
+  # Read FCS-file and create a dataframe 
+  data.df <- as.data.frame(exprs(read.FCS(f, truncate_max_range = FALSE,
+                 transformation =  TRUE, # this setting performs a transformation.
+                 column.pattern = "FJComp"))) # to only include the compensated area channels and exclude FSC and SSC
+  # Select number of cells and label which file 
+  NewFileName <- gsub("^[^ ]* |_[^_]*$", "", f) # removes everything of the file name after the first "_" because there is the first space.
+  #down sample to number of cells as chosen in general settings, Safety switch for the number of cells. 
+  if(nrow(data.df) < ncell){
+    data.input <- data.df[ sample(nrow(data.df), nrow(data.df)), ]
+  }else{
+    data.input <- data.df[ sample(nrow(data.df), ncell), ]
+  }
+  #add file name to column
+  data.input$File <- rep.int(NewFileName, nrow(data.input))
+  # Combine file with but only first cells
+  flowfiles.df <- bind_rows(flowfiles.df, data.input)
+}
+
+dim(flowfiles.df)
+head(flowfiles.df)
+
+```
+
+Adjusting the column names to the marker name
+```{r rename column names}
+colnames(flowfiles.df)
+
+i1 <- match(colnames(flowfiles.df), channelmarkerconv$Channel) 
+i2 <- !is.na(i1)
+names(flowfiles.df)[i2] <- channelmarkerconv$Marker[i1[i2]]
+names(flowfiles.df)
+
+```
+
+### prepare the data
+
+```{r loaded data check}
+# plotting of the imported data
+d <- density(flowfiles.df$CD64)
+plot(d)
+
+```
+
+
+Although the data seems to be transformed and scaled in FlowJo, when loading the data and checking the distribution it is not! Additionally we want to exclude outliers in the form of antibody aggregates and false negatives by removing the top and bottom 1-5% of values from each channel (this is called winsorizing). With large data sets and high number of cells 1% should be good. With few cells 5% is a safer option.
+
+
+```{r winsorizing and transformation}
+#winsorize dataset in bulk to remove outliers
+winfiles.df <- bind_cols(lapply(flowfiles.df, wins_vars, pct_level = 0.001)) # pct_level is by default 0.005
+
+d1 <- density(winfiles.df$CD64)
+plot(d1)
+
+### Biex transform data
+biexfiles.df <- winfiles.df[,2:10] # columns 2 to 10 are the markers required. 12 is the file name which cannot be transformed so has to be excluded.
+biexfiles.df <- bind_cols(lapply(biexfiles.df, trans))
+biexfiles.df$File <- winfiles.df$File # add the File column again
+
+d2 <- density(biexfiles.df$CD64)
+plot(d2)
+
+```
+
+As the intensity of all channels is different the data is scaled between 0 and 1 so that when performing dimensional reduction analysis each marker has the same weight in the analysis. 
+We also found that this step reduces batch effects when present, although this is not a batch correction. 
+
+###### important notice ########################
+each time UMAP or PCA is re-runned, you run from here ################################################
+
+
+```{r Scaling}
+# find min and max of all columns in total dataset
+options(scipen=999) # to ensure numeric values below 999 are printed NOT with scientific notation.
+min.v <- as.matrix(apply(biexfiles.df[,1:9],2,min)) # 1:9 correspond to the columns with values to normalize, 2 indicates that we take the columns.
+min.v <- as.data.frame(min.v)
+min.v <- as.numeric(gsub(",","",min.v$V1))
+max.v <- as.matrix(apply(biexfiles.df[,1:9],2,max))
+max.v <- as.data.frame(max.v)
+max.v <- as.numeric(gsub(",","",max.v$V1))
+
+### nomalize dataframe containing all files to min and max of healthy samples. 
+exprs.trim <- biexfiles.df %>% 
+  dplyr::select(- contains("File")) # other way of only selecting the 1:9 columns
+scalefiles.df <- t((t(exprs.trim) - min.v) / (max.v - min.v))
+scalefiles.df[scalefiles.df < 0] <- 0
+scalefiles.df[scalefiles.df > 1] <- 1
+scalefiles.df <- as.data.frame(scalefiles.df)
+scalefiles.df$File <- biexfiles.df$File # add the File name to the normalized data frame
+
+d3 <- density(scalefiles.df$CD64)
+plot(d3)
+
+```
+
+#### PCA
+```{r PCA}
+### PCA for the first 4 components using the same classifiers as for the classification
+pca.prep = scalefiles.df %>% 
+  dplyr::select(- contains("File")) # other way of only selecting the 1:9 columns
+pca.scale.df = prcomp(x = pca.prep)
+scalefiles.df %<>% cbind(pca.scale.df$x[,1:4])
+
+plot(scalefiles.df$PC1, 
+     scalefiles.df$PC2, 
+     pch=16, 
+     cex=0.3)
+
+plot(scalefiles.df$PC3, 
+     scalefiles.df$PC4, 
+     pch=16, 
+     cex=0.3)
+
+
+### create a proper ggplot 
+ggplot(scalefiles.df,  aes(x = PC1, y = PC2, color = File)) +
+  geom_point(size = 0.2, show.legend = TRUE) +
+  theme_classic()
+
+
+### shoulder plot of the contribution of all PCA's 
+fviz_eig(pca.scale.df)
+
+
+## adding component names to the PCA 
+fviz_pca_var(pca.scale.df)
+
+## show the PCA3 and 4
+fviz_pca_var(pca.scale.df, axes = c(3,4))
+
+
+# for plotting the intensity per marker
+ggplot(scalefiles.df, aes(x = PC1, y = PC2, color = CD64)) +
+  geom_point(size = 0.2, show.legend = TRUE) +
+  theme_classic() 
+
+
+```
+
+```{r coloring PCA}
+
+scalefiles.df %>% 
+  dplyr::mutate(conditioned_medium = dplyr::case_when(
+    grepl("M0",File) ~ "M0",
+    grepl("M2",File) ~ "M2-like",
+    grepl("M1",File) ~ "M1-like", 
+    grepl("MG63",File) ~ "MG63",
+    grepl("SAOS",File) ~ "SAOS",
+    grepl("U2OS",File) ~ "U2OS",
+    grepl("CTR",File) ~ "CTR",
+    grepl("MSC",File) ~ "MSC")) %>%
+ggplot(aes(x = PC1, y = PC2, color = conditioned_medium)) +
+  geom_point(size = 0.2, show.legend = TRUE) +
+  theme_classic()
+
+## COLOUR PER EXPERIMENT for PC1 & PC2
+scalefiles.df %>% 
+  dplyr::mutate(experiment = dplyr::case_when(
+    grepl("MDD2019781",File) ~ "MDD2019781",
+    grepl("MDD2018675",File) ~ "MDD2018675",
+    grepl("MDD2017300",File) ~ "MDD2017300",
+    grepl("MDD2017274",File) ~ "MDD2017274",
+    grepl("MDD201762",File) ~ "MDD201762",
+    TRUE ~ "BC20240227")) %>%
+  dplyr::mutate(experiment = factor(experiment, 
+                                    levels = c( "MDD2019781","MDD2018675", "MDD2017300", "MDD2017274", "BC20240227", "MDD201762"))) %>%
+  dplyr::arrange(experiment) %>%
+  ggplot(aes(x = PC1, y = PC2, color = experiment)) +
+  geom_point(size = 0.2, show.legend = TRUE) +
+  theme_classic() +
+  scale_color_manual(values = c("#440154FF" ,"#482677FF" ,"#3E4A89FF", "#31688EFF", "#26828EFF", "#1F9E89FF"))
+
+
+scalefiles.df %>% 
+  dplyr::mutate(experiment = dplyr::case_when(
+    grepl("MDD2019781",File) ~ "MDD2019781",
+    grepl("MDD2018675",File) ~ "MDD2018675",
+    grepl("MDD2017300",File) ~ "MDD2017300",
+    grepl("MDD2017274",File) ~ "MDD2017274",
+    grepl("MDD201762",File) ~ "MDD201762",
+    TRUE ~ "BC20240227")) %>%
+  dplyr::mutate(experiment = factor(experiment, 
+                                    levels = c("MDD201762", "MDD2019781", "MDD2018675", "MDD2017300",  "MDD2017274", "BC20240227"))) %>%
+  dplyr::arrange(experiment) %>%
+  ggplot(aes(x = PC1, y = PC2, color = experiment)) +
+  geom_point(size = 0.2, show.legend = TRUE) +
+  theme_classic() +
+  scale_color_manual(values = c("#1F9E89FF","#440154FF" ,"#482677FF" ,"#3E4A89FF", "#31688EFF", "#26828EFF"))
+
+## COLOUR PER EXPERIMENT for PC3 & PC4
+scalefiles.df %>% 
+  dplyr::mutate(experiment = dplyr::case_when(
+    grepl("MDD2019781",File) ~ "MDD2019781",
+    grepl("MDD2018675",File) ~ "MDD2018675",
+    grepl("MDD2017300",File) ~ "MDD2017300",
+    grepl("MDD2017274",File) ~ "MDD2017274",
+    grepl("MDD201762",File) ~ "MDD201762",
+    TRUE ~ "BC20240227")) %>%
+  dplyr::mutate(experiment = factor(experiment, 
+                                    levels = c( "MDD2019781", "MDD2018675", "MDD2017300", "MDD2017274", "BC20240227", "MDD201762"))) %>%
+  dplyr::arrange(experiment) %>%
+ggplot(aes(x = PC3, y = PC4, color = experiment)) +
+  geom_point(size = 0.2, show.legend = TRUE) +
+  theme_classic() +
+  scale_color_manual(values = c("#440154FF" ,"#482677FF" ,"#3E4A89FF", "#31688EFF", "#26828EFF", "#1F9E89FF"))
+
+scalefiles.df %>% 
+  dplyr::mutate(experiment = dplyr::case_when(
+    grepl("MDD2019781",File) ~ "MDD2019781",
+    grepl("MDD2018675",File) ~ "MDD2018675",
+    grepl("MDD2017300",File) ~ "MDD2017300",
+    grepl("MDD2017274",File) ~ "MDD2017274",
+    grepl("MDD201762",File) ~ "MDD201762",
+    TRUE ~ "BC20240227")) %>%
+  dplyr::mutate(experiment = factor(experiment, levels = c("MDD201762", "MDD2019781", "MDD2018675", "MDD2017300", "MDD2017274", "BC20240227"))) %>%
+  dplyr::arrange(experiment) %>%
+ggplot(aes(x = PC3, y = PC4, color = experiment)) +
+  geom_point(size = 0.2, show.legend = TRUE) +
+  theme_classic() +
+  scale_color_manual(values = c("#1F9E89FF","#440154FF" ,"#482677FF" ,"#3E4A89FF", "#31688EFF", "#26828EFF"))
+
+
+
+## COLOUR PER CONDITION for PC1 & PC2
+scalefiles.df %>% 
+  dplyr::mutate(condition = dplyr::case_when(
+    grepl("62_MT|274_MT|227_MT|Feb_MT|62_MG63|274_MG63|227_MG63",File) ~ "2day",
+    grepl("Mn|300_MT|300_MG63|781_MT|781_MG63|675_MT|675_MG63",File) ~ "8day",
+    grepl("noMCSF",File) ~ "noMCSF",
+    grepl("M1", File) ~ "M1",
+    grepl("M2",File) ~ "M2",
+    grepl("M0",File) ~ "M0",
+    TRUE ~ "Misc")) %>%
+ggplot(aes(x = PC1, y = PC2, color = condition)) +
+  geom_point(size = 0.2, show.legend = TRUE) +
+  theme_classic()
+
+## COLOUR PER CONDITION for PC3 & PC4
+scalefiles.df %>% 
+  dplyr::mutate(condition = dplyr::case_when(
+    grepl("62_MT|274_MT|227_MT|Feb_MT|62_MG63|274_MG63|227_MG63",File) ~ "2day",
+    grepl("Mn|300_MT|300_MG63|781_MT|781_MG63|675_MT|675_MG63",File) ~ "8day",
+    grepl("noMCSF",File) ~ "noMCSF",
+    grepl("M1", File) ~ "M1",
+    grepl("M2",File) ~ "M2",
+    grepl("M0",File) ~ "M0",
+    TRUE ~ "Misc")) %>%
+ggplot(aes(x = PC3, y = PC4, color = condition)) +
+  geom_point(size = 0.2, show.legend = TRUE) +
+  theme_classic()
+
+``` 
+
+## saving skewed PCA
+```{r}
+PCA_skew_PC12.1 <- scalefiles.df %>% 
+  dplyr::mutate(experiment = dplyr::case_when(
+    grepl("MDD2019781",File) ~ "MDD2019781",
+    grepl("MDD2018675",File) ~ "MDD2018675",
+    grepl("MDD2017300",File) ~ "MDD2017300",
+    grepl("MDD2017274",File) ~ "MDD2017274",
+    grepl("MDD201762",File) ~ "MDD201762",
+    TRUE ~ "BC20240227")) %>%
+  dplyr::mutate(experiment = factor(experiment, levels = c("MDD2019781", "MDD2018675", "MDD2017300",  "MDD2017274", "BC20240227", "MDD201762"))) %>%
+  dplyr::arrange(experiment) %>%
+  ggplot(aes(x = PC1, y = PC2, color = experiment)) +
+  geom_point(size = 0.2, show.legend = TRUE) +
+  theme_classic() +
+  scale_color_manual(values = c("#440154FF" ,"#482677FF" ,"#3E4A89FF", "#31688EFF", "#26828EFF", "#1F9E89FF")) +
+  labs(color = "Donor")
+ggsave(filename = "PCA_skew_PC12.1.png", plot = PCA_skew_PC12.1, width = 8, height = 6, path = workdir5, dpi = 600)
+
+
+PCA_skew_PC12.2 <- scalefiles.df %>% 
+  dplyr::mutate(experiment = dplyr::case_when(
+    grepl("MDD2019781",File) ~ "MDD2019781",
+    grepl("MDD2018675",File) ~ "MDD2018675",
+    grepl("MDD2017300",File) ~ "MDD2017300",
+    grepl("MDD2017274",File) ~ "MDD2017274",
+    grepl("MDD201762",File) ~ "MDD201762",
+    TRUE ~ "BC20240227")) %>%
+  dplyr::mutate(experiment = factor(experiment, levels = c("MDD201762", "MDD2019781","MDD2018675","MDD2017300", "MDD2017274","BC20240227"))) %>%
+  dplyr::arrange(experiment) %>%
+  ggplot(aes(x = PC1, y = PC2, color = experiment)) +
+  geom_point(size = 0.2, show.legend = TRUE) +
+  theme_classic() +
+  scale_color_manual(values = c("#1F9E89FF","#440154FF" ,"#482677FF" ,"#3E4A89FF", "#31688EFF", "#26828EFF"))+
+  labs(color = "Donor")
+ggsave(filename = "PCA_skew_PC12.2.png", plot = PCA_skew_PC12.2, width = 8, height = 6, path = workdir5, dpi = 600)
+
+## COLOUR PER EXPERIMENT for PC3 & PC4
+PCA_skew_PC34.1 <- scalefiles.df %>% 
+  dplyr::mutate(experiment = dplyr::case_when(
+    grepl("MDD2019781",File) ~ "MDD2019781",
+    grepl("MDD2018675",File) ~ "MDD2018675",
+    grepl("MDD2017300",File) ~ "MDD2017300",
+    grepl("MDD2017274",File) ~ "MDD2017274",
+    grepl("MDD201762",File) ~ "MDD201762",
+    TRUE ~ "BC20240227")) %>%
+  dplyr::mutate(experiment = factor(experiment, levels = c("MDD2019781", "MDD2018675", "MDD2017300",  "MDD2017274", "BC20240227", "MDD201762"))) %>%
+  dplyr::arrange(experiment) %>%
+ggplot(aes(x = PC3, y = PC4, color = experiment)) +
+  geom_point(size = 0.2, show.legend = TRUE) +
+  theme_classic() +
+  scale_color_manual(values = c("#440154FF" ,"#482677FF" ,"#3E4A89FF", "#31688EFF", "#26828EFF", "#1F9E89FF"))+
+  labs(color = "Donor")
+ggsave(filename = "PCA_skew_PC34.1.png", plot = PCA_skew_PC34.1, width = 8, height = 6, path = workdir5, dpi = 600)
+
+
+PCA_skew_PC34.2 <-scalefiles.df %>% 
+  dplyr::mutate(experiment = dplyr::case_when(
+    grepl("MDD2019781",File) ~ "MDD2019781",
+    grepl("MDD2018675",File) ~ "MDD2018675",
+    grepl("MDD2017300",File) ~ "MDD2017300",
+    grepl("MDD2017274",File) ~ "MDD2017274",
+    grepl("MDD201762",File) ~ "MDD201762",
+    TRUE ~ "BC20240227")) %>%
+  dplyr::mutate(experiment = factor(experiment, levels = c("MDD201762", "MDD2019781", "MDD2018675", "MDD2017300", "MDD2017274", "BC20240227"))) %>%
+  dplyr::arrange(experiment) %>%
+ggplot(aes(x = PC3, y = PC4, color = experiment)) +
+  geom_point(size = 0.2, show.legend = TRUE) +
+  theme_classic() +
+  scale_color_manual(values = c("#1F9E89FF","#440154FF" ,"#482677FF" ,"#3E4A89FF", "#31688EFF", "#26828EFF"))+
+  labs(color = "Donor")
+ggsave(filename = "PCA_skew_PC34.2.png", plot = PCA_skew_PC34.2, width = 8, height = 6, path = workdir5, dpi = 600)
+
+
+```
+
+
+## Data analysis with final subset of FCS files 
+
+### load pre-gated FCS data
+```{r}
+# also this entire experiment is removed because it skewes all its datapoints due to ultranegative CD80 and seen on the UMAP that they all cluster apart despite having similar conditions to other experiments. skewing is resolved by removing this experiment.
+fcsfiles_FINAL <- fcsfiles[!grepl("MDD201762", fcsfiles)]
+
+
+# subsetting
+fcsfiles_FINAL <- fcsfiles_FINAL[grepl("300_MT|300_MG63|781_MT|781_MG63|675_MT|675_MG63|M0|M1|M2", fcsfiles_FINAL)] # only greppling conditions that were dissimilar to our final condition of 8 day treatment and all the M0- M1- and M2-like macrophages as they were all treated similarly.
+
+fcsfiles_FINAL <- fcsfiles_FINAL[!grepl("2ug|5ug|10ug|25ug", fcsfiles_FINAL)] # removing special conditions with reduced protein concentration as they are not of interest for this comparison.
+
+```
+
+
+
+```{r}
+
+# column.pattern specifies that we will only take the area columns. Not the width and height. 
+flowfiles.df_FINAL <- {}  
+for (f in fcsfiles_FINAL){
+  # Read FCS-file and create a dataframe 
+  data.df <- as.data.frame(exprs(read.FCS(f, truncate_max_range = FALSE,
+                 transformation =  TRUE, # this setting performs a transformation.
+                 column.pattern = "FJComp"))) # to only include the compensated channels and exclude FSC and SSC
+  # Select number of cells and label which file 
+  NewFileName <- gsub("^[^ ]* |_[^_]*$", "", f) # removes everything of the file name after the first "_" because there is the first space.
+    #was originally gsub("^[^ ]* ", "",f)
+  #down sample to number of cells as chosen in general settings, Safety switch for the number of cells. 
+  if(nrow(data.df) < ncell){
+    data.input <- data.df[ sample(nrow(data.df), nrow(data.df)), ]
+  }else{
+    data.input <- data.df[ sample(nrow(data.df), ncell), ]
+  }
+  #add file name to column
+  data.input$File <- rep.int(NewFileName, nrow(data.input))
+  # Combine file with but only first cells
+  flowfiles.df_FINAL <- bind_rows(flowfiles.df_FINAL, data.input)
+}
+
+dim(flowfiles.df_FINAL)
+head(flowfiles.df_FINAL)
+
+```
+
+```{r rename column names}
+colnames(flowfiles.df_FINAL)
+
+i1 <- match(colnames(flowfiles.df_FINAL), channelmarkerconv$Channel) 
+i2 <- !is.na(i1)
+names(flowfiles.df_FINAL)[i2] <- channelmarkerconv$Marker[i1[i2]]
+names(flowfiles.df_FINAL)
+
+```
+
+### prepare the data
+```{r}
+# plotting of the imported data
+d_FINAL <- density(flowfiles.df_FINAL$CD86)
+plot(d_FINAL)
+
+```
+
+```{r winsorizing and transformation}
+#winsorize dataset in bulk (seems better if winsorizing is done before transformation!) to remove outliers
+winfiles.df_FINAL <- bind_cols(lapply(flowfiles.df_FINAL, wins_vars, pct_level = 0.001)) # pct_level is by default 0.005
+
+d1_FINAL <- density(winfiles.df_FINAL$CD64)
+plot(d1_FINAL)
+
+### Biex transform data
+biexfiles.df_FINAL <- winfiles.df_FINAL[,2:10] # column 2 to 10 are values required. 12 is the file name which cannot be transformed. 11+13+14 are unused markers.
+biexfiles.df_FINAL <- bind_cols(lapply(biexfiles.df_FINAL, trans))
+biexfiles.df_FINAL$File <- winfiles.df_FINAL$File # add the File column again
+
+d2_FINAL <- density(biexfiles.df_FINAL$CD206)
+plot(d2_FINAL)
+
+```
+
+
+###### important notice ########################
+each time UMAP or PCA is re-runned, you run from here ################################################
+
+
+```{r Scaling}
+# find min and max of all columns in total dataset
+options(scipen=999) # to ensure numeric values below 999 are printed NOT with scientific notation.
+min.v_FINAL <- as.matrix(apply(biexfiles.df_FINAL[,1:9],2,min)) # 1:9 correspond to the columns with values to normalize, 2 indicates columns.
+min.v_FINAL <- as.data.frame(min.v_FINAL)
+min.v_FINAL <- as.numeric(gsub(",","",min.v_FINAL$V1))
+max.v_FINAL <- as.matrix(apply(biexfiles.df_FINAL[,1:9],2,max))
+max.v_FINAL <- as.data.frame(max.v_FINAL)
+max.v_FINAL <- as.numeric(gsub(",","",max.v_FINAL$V1))
+
+### nomalize dataframe containing all files to min and max of healthy samples. 
+exprs.trim_FINAL <- biexfiles.df_FINAL %>% 
+  dplyr::select(- contains("File")) # other way of only selecting the 1:9 columns
+scalefiles.df_FINAL <- t((t(exprs.trim_FINAL) - min.v_FINAL) / (max.v_FINAL - min.v_FINAL))
+scalefiles.df_FINAL[scalefiles.df_FINAL < 0] <- 0
+scalefiles.df_FINAL[scalefiles.df_FINAL > 1] <- 1
+scalefiles.df_FINAL <- as.data.frame(scalefiles.df_FINAL)
+scalefiles.df_FINAL$File <- biexfiles.df_FINAL$File # add the File name to the normalized data frame
+
+d3_FINAL <- density(scalefiles.df_FINAL$CD80)
+plot(d3_FINAL)
+
+```
+#####PCA
+```{r PCA}
+### PCA for the first 4 components using the same classifiers as for the classification
+pca.prep_FINAL = scalefiles.df_FINAL %>% 
+  dplyr::select(- contains("File")) # other way of only selecting the 1:9 columns
+pca.scale.df_FINAL = prcomp(x = pca.prep_FINAL)
+scalefiles.df_FINAL %<>% cbind(pca.scale.df_FINAL$x[,1:4])
+
+plot(scalefiles.df_FINAL$PC1, 
+     scalefiles.df_FINAL$PC2, 
+     pch=16, 
+     cex=0.3)
+
+plot(scalefiles.df_FINAL$PC3, 
+     scalefiles.df_FINAL$PC4, 
+     pch=16, 
+     cex=0.3)
+
+
+### pretty ggplot 
+#pdf("PCA_norm_allmarkers.pdf")
+ggplot(scalefiles.df_FINAL,  aes(x = PC1, y = PC2, color = File)) +
+  geom_point(size = 0.2, show.legend = TRUE) +
+  theme_classic()
+
+
+### shoulder plot of the contribution of all PCA's 
+fviz_eig(pca.scale.df_FINAL)
+
+
+## adding component names to the PCA 
+fviz_pca_var(pca.scale.df_FINAL) 
+## show the PCA3 and 4
+fviz_pca_var(pca.scale.df_FINAL, axes = c(3,4))
+
+
+# for plotting the intensity per marker
+ggplot(scalefiles.df_FINAL, aes(x = PC1, y = PC2, color = CD64)) +
+  geom_point(size = 0.2, show.legend = TRUE) +
+  theme_classic() 
+
+
+```
+
+
+```{r coloring PCA}
+
+scalefiles.df_FINAL %>% 
+  dplyr::mutate(conditioned_medium = dplyr::case_when(grepl("M0",File) ~ "M0",
+                                               grepl("M2",File) ~ "M2-like",
+                                               grepl("M1",File) ~ "M1-like", 
+                                               grepl("MG63",File) ~ "MG63",
+                                               grepl("SAOS",File) ~ "SAOS",
+                                               grepl("U2OS",File) ~ "U2OS",
+                                               grepl("CTR",File) ~ "CTR",
+                                               grepl("MSC",File) ~ "MSC")) %>%
+ggplot(aes(x = PC1, y = PC2, color = conditioned_medium)) +
+  geom_point(size = 0.2, show.legend = TRUE) +
+  theme_classic()
+
+## COLOUR PER EXPERIMENT for PC1 & PC2
+scalefiles.df_FINAL %>% 
+  dplyr::mutate(experiment = dplyr::case_when(grepl("MDD2019781",File) ~ "MDD2019781",
+                                              grepl("MDD2018675",File) ~ "MDD2018675",
+                                              grepl("MDD2017300",File) ~ "MDD2017300",
+                                              grepl("MDD2017274",File) ~ "MDD2017274",
+                                              grepl("MDD201762",File) ~ "MDD201762",
+                                              TRUE ~ "BC20240227")) %>%
+  dplyr::mutate(experiment = factor(experiment, levels = c( "MDD2019781","MDD2018675","MDD2017300", "MDD2017274","BC20240227","MDD201762"))) %>%
+  dplyr::arrange(experiment) %>%
+  ggplot(aes(x = PC1, y = PC2, color = experiment)) +
+  geom_point(size = 0.2, show.legend = TRUE) +
+  theme_classic()
+
+scalefiles.df_FINAL %>% 
+  dplyr::mutate(experiment = dplyr::case_when(grepl("MDD2019781",File) ~ "MDD2019781",
+                                              grepl("MDD2018675",File) ~ "MDD2018675",
+                                              grepl("MDD2017300",File) ~ "MDD2017300",
+                                              grepl("MDD2017274",File) ~ "MDD2017274",
+                                              grepl("MDD201762",File) ~ "MDD201762",
+                                              TRUE ~ "BC20240227")) %>%
+  dplyr::mutate(experiment = factor(experiment, levels = c("MDD201762", "MDD2019781","MDD2018675","MDD2017300", "MDD2017274","BC20240227"))) %>%
+  dplyr::arrange(experiment) %>%
+  ggplot(aes(x = PC1, y = PC2, color = experiment)) +
+  geom_point(size = 0.2, show.legend = TRUE) +
+  theme_classic()
+
+## COLOUR PER EXPERIMENT for PC3 & PC4
+scalefiles.df_FINAL %>% 
+  dplyr::mutate(experiment = dplyr::case_when(grepl("MDD2019781",File) ~ "MDD2019781",
+                                              grepl("MDD2018675",File) ~ "MDD2018675",
+                                              grepl("MDD2017300",File) ~ "MDD2017300",
+                                              grepl("MDD2017274",File) ~ "MDD2017274",
+                                              grepl("MDD201762",File) ~ "MDD201762",
+                                              TRUE ~ "BC20240227")) %>%
+  dplyr::mutate(experiment = factor(experiment, levels = c( "MDD2019781","MDD2018675","MDD2017300", "MDD2017274","BC20240227","MDD201762"))) %>%
+  dplyr::arrange(experiment) %>%
+ggplot(aes(x = PC3, y = PC4, color = experiment)) +
+  geom_point(size = 0.2, show.legend = TRUE) +
+  theme_classic()
+
+scalefiles.df_FINAL %>% 
+  dplyr::mutate(experiment = dplyr::case_when(grepl("MDD2019781",File) ~ "MDD2019781",
+                                              grepl("MDD2018675",File) ~ "MDD2018675",
+                                              grepl("MDD2017300",File) ~ "MDD2017300",
+                                              grepl("MDD2017274",File) ~ "MDD2017274",
+                                              grepl("MDD201762",File) ~ "MDD201762",
+                                              TRUE ~ "BC20240227")) %>%
+  dplyr::mutate(experiment = factor(experiment, levels = c("MDD201762", "MDD2019781","MDD2018675","MDD2017300", "MDD2017274","BC20240227"))) %>%
+  dplyr::arrange(experiment) %>%
+ggplot(aes(x = PC3, y = PC4, color = experiment)) +
+  geom_point(size = 0.2, show.legend = TRUE) +
+  theme_classic()
+
+
+## COLOUR PER CONDITION for PC1 & PC2
+scalefiles.df_FINAL %>% 
+  dplyr::mutate(condition = dplyr::case_when(grepl("62_MT|274_MT|227_MT|Feb_MT|62_MG63|274_MG63|227_MG63",File) ~ "2day",
+                                             grepl("Mn|300_MT|300_MG63|781_MT|781_MG63|675_MT|675_MG63",File) ~ "8day",
+                                             grepl("noMCSF",File) ~ "noMCSF",
+                                             grepl("M1", File) ~ "M1",
+                                             grepl("M2",File) ~ "M2",
+                                             grepl("M0",File) ~ "M0",
+                                             TRUE ~ "Misc")) %>%
+ggplot(aes(x = PC1, y = PC2, color = condition)) +
+  geom_point(size = 0.2, show.legend = TRUE) +
+  theme_classic()
+## COLOUR PER CONDITION for PC3 & PC4
+scalefiles.df_FINAL %>% 
+  dplyr::mutate(condition = dplyr::case_when(grepl("62_MT|274_MT|227_MT|Feb_MT|62_MG63|274_MG63|227_MG63",File) ~ "2day",
+                                             grepl("Mn|300_MT|300_MG63|781_MT|781_MG63|675_MT|675_MG63",File) ~ "8day",
+                                             grepl("noMCSF",File) ~ "noMCSF",
+                                             grepl("M1", File) ~ "M1",
+                                             grepl("M2",File) ~ "M2",
+                                             grepl("M0",File) ~ "M0",
+                                             TRUE ~ "Misc")) %>%
+ggplot(aes(x = PC3, y = PC4, color = condition)) +
+  geom_point(size = 0.2, show.legend = TRUE) +
+  theme_classic()
+
+``` 
+
+
+## saving PCA
+```{r}
+
+PCA_proper_PC12 <- scalefiles.df %>% 
+  dplyr::mutate(experiment = dplyr::case_when(
+    grepl("MDD2019781",File) ~ "MDD2019781",
+    grepl("MDD2018675",File) ~ "MDD2018675",
+    grepl("MDD2017300",File) ~ "MDD2017300",
+    grepl("MDD2017274",File) ~ "MDD2017274",
+    grepl("MDD201762",File) ~ "MDD201762",
+    TRUE ~ "BC20240227")) %>%
+  dplyr::mutate(experiment = factor(experiment, levels = c("MDD2019781", "MDD2018675", "MDD2017300",  "MDD2017274", "BC20240227", "MDD201762"))) %>%
+  dplyr::arrange(experiment) %>%
+  ggplot(aes(x = PC1, y = PC2, color = experiment)) +
+  geom_point(size = 0.2, show.legend = TRUE) +
+  theme_classic() +
+  scale_color_manual(values = c("#440154FF" ,"#482677FF" ,"#3E4A89FF", "#31688EFF", "#26828EFF")) +
+  labs(color = "Donor")
+ggsave(filename = "PCA_proper_PC12.png", plot = PCA_proper_PC12, width = 8, height = 6, path = workdir5, dpi = 600)
+
+PCA_proper_PC34 <- scalefiles.df %>% 
+  dplyr::mutate(experiment = dplyr::case_when(
+    grepl("MDD2019781",File) ~ "MDD2019781",
+    grepl("MDD2018675",File) ~ "MDD2018675",
+    grepl("MDD2017300",File) ~ "MDD2017300",
+    grepl("MDD2017274",File) ~ "MDD2017274",
+    grepl("MDD201762",File) ~ "MDD201762",
+    TRUE ~ "BC20240227")) %>%
+  dplyr::mutate(experiment = factor(experiment, levels = c("MDD201762", "MDD2019781", "MDD2018675", "MDD2017300", "MDD2017274", "BC20240227"))) %>%
+  dplyr::arrange(experiment) %>%
+  ggplot(aes(x = PC3, y = PC4, color = experiment)) +
+  geom_point(size = 0.2, show.legend = TRUE) +
+  theme_classic() +
+  scale_color_manual(values = c("#440154FF" ,"#482677FF" ,"#3E4A89FF", "#31688EFF", "#26828EFF"))+
+  labs(color = "Donor")
+ggsave(filename = "PCA_proper_PC34.png", plot = PCA_proper_PC34, width = 8, height = 6, path = workdir5, dpi = 600)
+
+
+```
+
+
+
+
+#### dimensional reduction by UMAP
+```{r perform UMAP}
+# default settings
+n = 60500
+n_iter = 1000 #how often the same sample is run over and over
+perplex = 50 #how smaller how more the local structure is shown, clusters more apart.
+lying_iter = 5000
+cl = 20
+k = 100
+coln = 50
+
+## excludes the non numeric columns like File
+umap.prep_FINAL = scalefiles.df_FINAL %>% 
+  dplyr::select(- contains("File")) 
+
+umap.norm_FINAL = umap(umap.prep_FINAL, 
+                 n_neighbors = perplex,  
+                 n_threads = 1, 
+                 n_epochs = n_iter)
+scalefiles.df_FINAL %<>% mutate(umap1 = umap.norm_FINAL[, 1], 
+                          umap2 = umap.norm_FINAL[, 2])
+
+plot(scalefiles.df_FINAL$umap1, 
+     scalefiles.df_FINAL$umap2, 
+     pch=16, 
+     cex=0.3)
+
+
+ggplot(scalefiles.df_FINAL, aes(x = umap1, y = umap2, color = File)) +
+  geom_point(size = 0.3) +
+  theme_classic() +
+  viridis::scale_color_viridis(discrete = TRUE)
+  
+```
+
+#### Colouring UMAPs
+```{r }
+
+## COLOUR PER SUPERNATANT
+scalefiles.df_FINAL %>% 
+  dplyr::mutate(conditioned_medium = dplyr::case_when(
+    grepl("M0",File) ~ "M0",
+     grepl("M2",File) ~ "M2-like",
+     grepl("M1",File) ~ "M1-like", 
+     grepl("MG63",File) ~ "MG63",
+     grepl("SAOS",File) ~ "SAOS",
+     grepl("U2OS",File) ~ "U2OS",
+     grepl("CTR",File) ~ "CTR",
+     grepl("MSC",File) ~ "MSC",
+     TRUE ~"Misc")) %>%
+ggplot(aes(x = umap1, y = umap2, color = conditioned_medium)) +
+  geom_point(size = 0.3) +
+  theme_classic() +
+  viridis::scale_color_viridis(discrete = TRUE)
+
+
+## COLOUR PER EXPERIMENT
+scalefiles.df_FINAL %>% 
+  dplyr::mutate(experiment = dplyr::case_when(
+    grepl("MDD2019781",File) ~ "MDD2019781",
+    grepl("MDD2018675",File) ~ "MDD2018675",
+    grepl("MDD2017300",File) ~ "MDD2017300",
+    grepl("MDD2017274",File) ~ "MDD2017274",
+    grepl("MDD201762",File) ~ "MDD201762",
+    TRUE ~ "BC20240227")) %>%
+  dplyr::mutate(experiment = factor(experiment, levels = c("MDD2019781","MDD2018675","MDD2017300", "MDD2017274","BC20240227", "MDD201762"))) %>%
+  dplyr::arrange(experiment) %>%
+ggplot(aes(x = umap1, y = umap2, color = experiment)) +
+  geom_point(size = 0.3) +
+  theme_classic() +
+  viridis::scale_color_viridis(discrete = TRUE)
+
+
+## COLOUR PERFECT 
+scalefiles.df_FINAL %>% 
+  dplyr::mutate(condition = dplyr::case_when(
+    grepl("M1", File) ~ "M1",
+     grepl("M2",File) ~ "M2",
+     grepl("M0",File) ~ "M0",
+     grepl("Mn_CTR|300_MT_CTR|781_MT_CTR|675_MT_CTR",File) ~ "8day_CTR",
+     grepl("Mn_SAOS|300_MT_SAOS|781_MT_SAOS|675_MT_SAOS",File) ~ "8day_SAOS",
+     grepl("Mn_U2OS|300_MT_U2OS|781_MT_U2OS|675_MT_U2OS",File) ~ "8day_U2OS",
+     grepl("Mn_MG63|227_MG63|300_MT_MG63|300_MG63|781_MT_MG63|781_MG63|675_MT_MG63|675_MG63",File) ~ "8day_MG63",
+     grepl("Mn_MSC|300_MT_MSC|781_MT_MSC|675_MT_MSC",File) ~ "8day_MSC",
+     TRUE ~ "Macrophage")) %>%
+ggplot(aes(x = umap1, y = umap2, color = condition)) +
+  geom_point(size = 0.1) +
+  geom_point(data = . %>% dplyr::filter(condition == "Macrophage"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_CTR"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_MSC"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_SAOS"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_MG63"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_U2OS"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "M0"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "M1"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "M2"), size = 0.3) +
+  theme_classic()  +
+  scale_color_manual(values = c("grey","grey","grey","grey","grey","forestgreen","steelblue4","tomato4"))
+
+
+scalefiles.df_FINAL %>% 
+  dplyr::mutate(condition = dplyr::case_when(
+    grepl("M1", File) ~ "M1",
+     grepl("M2",File) ~ "M2",
+     grepl("M0",File) ~ "M0",
+     grepl("Mn_CTR|300_MT_CTR|781_MT_CTR|675_MT_CTR",File) ~ "8day_CTR",
+     grepl("Mn_SAOS|300_MT_SAOS|781_MT_SAOS|675_MT_SAOS",File) ~ "8day_SAOS",
+     grepl("Mn_U2OS|300_MT_U2OS|781_MT_U2OS|675_MT_U2OS",File) ~ "8day_U2OS",
+     grepl("Mn_MG63|227_MG63|300_MT_MG63|300_MG63|781_MT_MG63|781_MG63|675_MT_MG63|675_MG63",File) ~ "8day_MG63",
+     grepl("Mn_MSC|300_MT_MSC|781_MT_MSC|675_MT_MSC",File) ~ "8day_MSC",
+     TRUE ~ "Macrophage")) %>%
+ggplot(aes(x = umap1, y = umap2, color = condition)) +
+  geom_point(size = 0.1) +
+  geom_point(data = . %>% dplyr::filter(condition == "Macrophage"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_CTR"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_MSC"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_SAOS"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_MG63"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_U2OS"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "M0"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "M1"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "M2"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_U2OS"), size = 0.3) +
+  theme_classic()  +
+  scale_color_manual(values = c("grey","grey","grey","grey","gold2","forestgreen","steelblue4","tomato4"))
+
+scalefiles.df_FINAL %>% 
+  dplyr::mutate(condition = dplyr::case_when(
+    grepl("M1", File) ~ "M1",
+     grepl("M2",File) ~ "M2",
+     grepl("M0",File) ~ "M0",
+     grepl("Mn_CTR|300_MT_CTR|781_MT_CTR|675_MT_CTR",File) ~ "8day_CTR",
+     grepl("Mn_SAOS|300_MT_SAOS|781_MT_SAOS|675_MT_SAOS",File) ~ "8day_SAOS",
+     grepl("Mn_U2OS|300_MT_U2OS|781_MT_U2OS|675_MT_U2OS",File) ~ "8day_U2OS",
+     grepl("Mn_MG63|227_MG63|300_MT_MG63|300_MG63|781_MT_MG63|781_MG63|675_MT_MG63|675_MG63",File) ~ "8day_MG63",
+     grepl("Mn_MSC|300_MT_MSC|781_MT_MSC|675_MT_MSC",File) ~ "8day_MSC",
+     TRUE ~ "Macrophage")) %>%
+ggplot(aes(x = umap1, y = umap2, color = condition)) +
+  geom_point(size = 0.1) +
+  geom_point(data = . %>% dplyr::filter(condition == "Macrophage"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_CTR"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_MSC"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_SAOS"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_MG63"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_U2OS"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "M0"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "M1"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "M2"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_MG63"), size = 0.3) +
+  theme_classic()  +
+  scale_color_manual(values = c("grey","orange2","grey","grey","grey","forestgreen","steelblue4","tomato4"))
+
+scalefiles.df_FINAL %>% 
+  dplyr::mutate(condition = dplyr::case_when(
+    grepl("M1", File) ~ "M1",
+     grepl("M2",File) ~ "M2",
+     grepl("M0",File) ~ "M0",
+     grepl("Mn_CTR|300_MT_CTR|781_MT_CTR|675_MT_CTR",File) ~ "8day_CTR",
+     grepl("Mn_SAOS|300_MT_SAOS|781_MT_SAOS|675_MT_SAOS",File) ~ "8day_SAOS",
+     grepl("Mn_U2OS|300_MT_U2OS|781_MT_U2OS|675_MT_U2OS",File) ~ "8day_U2OS",
+     grepl("Mn_MG63|227_MG63|300_MT_MG63|300_MG63|781_MT_MG63|781_MG63|675_MT_MG63|675_MG63",File) ~ "8day_MG63",
+     grepl("Mn_MSC|300_MT_MSC|781_MT_MSC|675_MT_MSC",File) ~ "8day_MSC",
+     TRUE ~ "Macrophage")) %>%
+ggplot(aes(x = umap1, y = umap2, color = condition)) +
+  geom_point(size = 0.1) +
+  geom_point(data = . %>% dplyr::filter(condition == "Macrophage"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_CTR"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_MSC"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_SAOS"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_MG63"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_U2OS"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "M0"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "M1"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "M2"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_SAOS"), size = 0.3) +
+  theme_classic()  +
+  scale_color_manual(values = c("grey","grey","grey","goldenrod","grey","forestgreen","steelblue4","tomato4"))
+
+scalefiles.df_FINAL %>% 
+  dplyr::mutate(condition = dplyr::case_when(
+    grepl("M1", File) ~ "M1",
+     grepl("M2",File) ~ "M2",
+     grepl("M0",File) ~ "M0",
+     grepl("Mn_CTR|300_MT_CTR|781_MT_CTR|675_MT_CTR",File) ~ "8day_CTR",
+     grepl("Mn_SAOS|300_MT_SAOS|781_MT_SAOS|675_MT_SAOS",File) ~ "8day_SAOS",
+     grepl("Mn_U2OS|300_MT_U2OS|781_MT_U2OS|675_MT_U2OS",File) ~ "8day_U2OS",
+     grepl("Mn_MG63|227_MG63|300_MT_MG63|300_MG63|781_MT_MG63|781_MG63|675_MT_MG63|675_MG63",File) ~ "8day_MG63",
+     grepl("Mn_MSC|300_MT_MSC|781_MT_MSC|675_MT_MSC",File) ~ "8day_MSC",
+     TRUE ~ "Macrophage")) %>%
+ggplot(aes(x = umap1, y = umap2, color = condition)) +
+  geom_point(size = 0.1) +
+  geom_point(data = . %>% dplyr::filter(condition == "Macrophage"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_CTR"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_MSC"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_SAOS"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_MG63"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_U2OS"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "M0"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "M1"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "M2"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_MSC"), size = 0.3) +
+  theme_classic()  +
+  scale_color_manual(values = c("grey","grey","cadetblue4","grey","grey","forestgreen","steelblue4","tomato4"))
+
+scalefiles.df_FINAL %>% 
+  dplyr::mutate(condition = dplyr::case_when(
+    grepl("M1", File) ~ "M1",
+     grepl("M2",File) ~ "M2",
+     grepl("M0",File) ~ "M0",
+     grepl("Mn_CTR|300_MT_CTR|781_MT_CTR|675_MT_CTR",File) ~ "8day_CTR",
+     grepl("Mn_SAOS|300_MT_SAOS|781_MT_SAOS|675_MT_SAOS",File) ~ "8day_SAOS",
+     grepl("Mn_U2OS|300_MT_U2OS|781_MT_U2OS|675_MT_U2OS",File) ~ "8day_U2OS",
+     grepl("Mn_MG63|227_MG63|300_MT_MG63|300_MG63|781_MT_MG63|781_MG63|675_MT_MG63|675_MG63",File) ~ "8day_MG63",
+     grepl("Mn_MSC|300_MT_MSC|781_MT_MSC|675_MT_MSC",File) ~ "8day_MSC",
+     TRUE ~ "Macrophage")) %>%
+ggplot(aes(x = umap1, y = umap2, color = condition)) +
+  geom_point(size = 0.1) +
+  geom_point(data = . %>% dplyr::filter(condition == "Macrophage"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_CTR"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_MSC"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_SAOS"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_MG63"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_U2OS"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "M0"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "M1"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "M2"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_CTR"), size = 0.3) +
+  theme_classic()  +
+  scale_color_manual(values = c("black","grey","grey","grey","grey","forestgreen","steelblue4","tomato4"))
+
+```
+
+
+## saving UMAPs
+```{r}
+
+UMAP_M012 <- scalefiles.df_FINAL %>% 
+  dplyr::mutate(clusters = dplyr::case_when(
+    grepl("M1", File) ~ "M1",
+    grepl("M2",File) ~ "M2",
+    grepl("M0",File) ~ "M0",
+    TRUE ~ "Treated")) %>%
+ggplot(aes(x = umap1, y = umap2, color = clusters)) +
+  geom_point(data = . %>% dplyr::filter(clusters == "Treated"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(clusters == "M0"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(clusters == "M1"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(clusters == "M2"), size = 0.3) +
+  theme_classic() +
+  scale_color_manual(values = c("forestgreen","steelblue4","tomato4","grey"))
+
+ggsave(filename = "UMAP_M012.png", plot = UMAP_M012, width = 8, height = 6, path = workdir5, dpi = 600)
+
+
+UMAP_M012_CTR <- scalefiles.df_FINAL %>% 
+  dplyr::mutate(condition = dplyr::case_when(
+    grepl("M1", File) ~ "M1",
+    grepl("M2",File) ~ "M2",
+    grepl("M0",File) ~ "M0",
+    grepl("Mn_CTR|300_MT_CTR|781_MT_CTR|675_MT_CTR",File) ~ "8day_CTR",
+    grepl("Mn_SAOS|300_MT_SAOS|781_MT_SAOS|675_MT_SAOS",File) ~ "8day_SAOS",
+    grepl("Mn_U2OS|300_MT_U2OS|781_MT_U2OS|675_MT_U2OS",File) ~ "8day_U2OS",
+    grepl("Mn_MG63|227_MG63|300_MT_MG63|300_MG63|781_MT_MG63|781_MG63|675_MT_MG63|675_MG63",File) ~ "8day_MG63",
+    grepl("Mn_MSC|300_MT_MSC|781_MT_MSC|675_MT_MSC",File) ~ "8day_MSC",
+    TRUE ~ "Macrophage")) %>%
+ggplot(aes(x = umap1, y = umap2, color = condition)) +
+  geom_point(size = 0.1) +
+  geom_point(data = . %>% dplyr::filter(condition == "Macrophage"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_CTR"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_MSC"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_SAOS"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_MG63"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_U2OS"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "M0"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "M1"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "M2"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_CTR"), size = 0.3) +
+  theme_classic()  +
+  scale_color_manual(values = c("black","grey","grey","grey","grey","forestgreen","steelblue4","tomato4"))
+
+ggsave(filename = "UMAP_M012_CTR.png", plot = UMAP_M012_CTR, width = 8, height = 6, path = workdir5, dpi = 600)
+
+  
+UMAP_M012_MSC <- scalefiles.df_FINAL %>% 
+  dplyr::mutate(condition = dplyr::case_when(
+    grepl("M1", File) ~ "M1",
+    grepl("M2",File) ~ "M2",
+    grepl("M0",File) ~ "M0",
+    grepl("Mn_CTR|300_MT_CTR|781_MT_CTR|675_MT_CTR",File) ~ "8day_CTR",
+    grepl("Mn_SAOS|300_MT_SAOS|781_MT_SAOS|675_MT_SAOS",File) ~ "8day_SAOS",
+    grepl("Mn_U2OS|300_MT_U2OS|781_MT_U2OS|675_MT_U2OS",File) ~ "8day_U2OS",
+    grepl("Mn_MG63|227_MG63|300_MT_MG63|300_MG63|781_MT_MG63|781_MG63|675_MT_MG63|675_MG63",File) ~  "8day_MG63",
+    grepl("Mn_MSC|300_MT_MSC|781_MT_MSC|675_MT_MSC",File) ~ "8day_MSC",
+    TRUE ~ "Macrophage")) %>%
+ggplot(aes(x = umap1, y = umap2, color = condition)) +
+  geom_point(size = 0.1) +
+  geom_point(data = . %>% dplyr::filter(condition == "Macrophage"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_CTR"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_MSC"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_SAOS"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_MG63"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_U2OS"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "M0"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "M1"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "M2"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_MSC"), size = 0.3) +
+  theme_classic()  +
+  scale_color_manual(values = c("grey","grey","cadetblue4","grey","grey","forestgreen","steelblue4","tomato4"))
+
+ggsave(filename = "UMAP_M012_MSC.png", plot = UMAP_M012_MSC, width = 8, height = 6, path = workdir5, dpi = 600)
+
+
+UMAP_M012_U2OS <- scalefiles.df_FINAL %>% 
+  dplyr::mutate(condition = dplyr::case_when(
+    grepl("M1", File) ~ "M1",
+    grepl("M2",File) ~ "M2",
+    grepl("M0",File) ~ "M0",
+    grepl("Mn_CTR|300_MT_CTR|781_MT_CTR|675_MT_CTR",File) ~ "8day_CTR",
+    grepl("Mn_SAOS|300_MT_SAOS|781_MT_SAOS|675_MT_SAOS",File) ~ "8day_SAOS",
+    grepl("Mn_U2OS|300_MT_U2OS|781_MT_U2OS|675_MT_U2OS",File) ~ "8day_U2OS",
+    grepl("Mn_MG63|227_MG63|300_MT_MG63|300_MG63|781_MT_MG63|781_MG63|675_MT_MG63|675_MG63",File) ~ "8day_MG63",
+    grepl("Mn_MSC|300_MT_MSC|781_MT_MSC|675_MT_MSC",File) ~ "8day_MSC",
+    TRUE ~ "Macrophage")) %>%
+ggplot(aes(x = umap1, y = umap2, color = condition)) +
+  geom_point(size = 0.1) +
+  geom_point(data = . %>% dplyr::filter(condition == "Macrophage"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_CTR"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_MSC"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_SAOS"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_MG63"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_U2OS"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "M0"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "M1"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "M2"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_U2OS"), size = 0.3) +
+  theme_classic()  +
+  scale_color_manual(values = c("grey","grey","grey","grey","gold2","forestgreen","steelblue4","tomato4"))
+
+ggsave(filename = "UMAP_M012_U2OS.png", plot = UMAP_M012_U2OS, width = 8, height = 6, path = workdir5, dpi = 600)
+
+
+UMAP_M012_SAOS <- scalefiles.df_FINAL %>% 
+  dplyr::mutate(condition = dplyr::case_when(
+    grepl("M1", File) ~ "M1",
+    grepl("M2",File) ~ "M2",
+    grepl("M0",File) ~ "M0",
+    grepl("Mn_CTR|300_MT_CTR|781_MT_CTR|675_MT_CTR",File) ~ "8day_CTR",
+    grepl("Mn_SAOS|300_MT_SAOS|781_MT_SAOS|675_MT_SAOS",File) ~ "8day_SAOS",
+    grepl("Mn_U2OS|300_MT_U2OS|781_MT_U2OS|675_MT_U2OS",File) ~ "8day_U2OS",
+    grepl("Mn_MG63|227_MG63|300_MT_MG63|300_MG63|781_MT_MG63|781_MG63|675_MT_MG63|675_MG63",File) ~ "8day_MG63",
+    grepl("Mn_MSC|300_MT_MSC|781_MT_MSC|675_MT_MSC",File) ~ "8day_MSC",
+    TRUE ~ "Macrophage")) %>%
+ggplot(aes(x = umap1, y = umap2, color = condition)) +
+  geom_point(size = 0.1) +
+  geom_point(data = . %>% dplyr::filter(condition == "Macrophage"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_CTR"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_MSC"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_SAOS"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_MG63"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_U2OS"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "M0"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "M1"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "M2"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_SAOS"), size = 0.3) +
+  theme_classic()  +
+  scale_color_manual(values = c("grey","grey","grey","goldenrod","grey","forestgreen","steelblue4","tomato4"))
+
+ggsave(filename = "UMAP_M012_SAOS.png", plot = UMAP_M012_SAOS, width = 8, height = 6, path = workdir5, dpi = 600)
+  
+
+UMAP_M012_MG63 <- scalefiles.df_FINAL %>% 
+  dplyr::mutate(condition = dplyr::case_when(
+    grepl("M1", File) ~ "M1",
+    grepl("M2",File) ~ "M2",
+    grepl("M0",File) ~ "M0",
+    grepl("Mn_CTR|300_MT_CTR|781_MT_CTR|675_MT_CTR",File) ~ "8day_CTR",
+    grepl("Mn_SAOS|300_MT_SAOS|781_MT_SAOS|675_MT_SAOS",File) ~ "8day_SAOS",
+    grepl("Mn_U2OS|300_MT_U2OS|781_MT_U2OS|675_MT_U2OS",File) ~ "8day_U2OS",
+    grepl("Mn_MG63|227_MG63|300_MT_MG63|300_MG63|781_MT_MG63|781_MG63|675_MT_MG63|675_MG63",File) ~  "8day_MG63",
+    grepl("Mn_MSC|300_MT_MSC|781_MT_MSC|675_MT_MSC",File) ~ "8day_MSC",
+    TRUE ~ "Macrophage")) %>%
+ggplot(aes(x = umap1, y = umap2, color = condition)) +
+  geom_point(size = 0.1) +
+  geom_point(data = . %>% dplyr::filter(condition == "Macrophage"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_CTR"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_MSC"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_SAOS"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_MG63"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_U2OS"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "M0"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "M1"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "M2"), size = 0.3) +
+  geom_point(data = . %>% dplyr::filter(condition == "8day_MG63"), size = 0.3) +
+  theme_classic()  +
+  scale_color_manual(values = c("grey","orange2","grey","grey","grey","forestgreen","steelblue4","tomato4"))
+
+ggsave(filename = "UMAP_M012_MG63.png", plot = UMAP_M012_MG63, width = 8, height = 6, path = workdir5, dpi = 600)
+
+
+```
+
+

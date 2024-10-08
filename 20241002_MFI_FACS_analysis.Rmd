@@ -1,0 +1,1179 @@
+---
+title: "20241002_MFI_FACS_analysis"
+author: "A. van Opstal"
+date: "2024-10-02"
+output: github_document
+---
+
+# Median Fluorescence Intensity analysis of 9 macrophage markers on monocyte-derived macrophages.
+M2-like macrophage markers: CD163, CD206
+M1-like macrophage markers: CD80, CD86, HLADR
+general macrophage markers: CD11b, CD14, CD16, CD64
+
+
+# Setup
+## R Packages
+```{r packages, message=FALSE, warning = FALSE }
+# You can check if all the packages are installed and if you can read in the libraries without errors.
+library(flowCore)
+library(uwot)
+library(dplyr)
+library(magrittr)
+library(Rtsne)
+library(ggplot2)
+library(pheatmap)
+library(FNN)
+library(igraph)
+library(matrixStats)
+library(RColorBrewer)
+library(reshape2)
+library(FlowSOM)
+library(ConsensusClusterPlus)
+library(flowWorkspace)
+library(DescTools)
+library(factoextra)
+library(patchwork)
+
+library(tidyverse) 
+library("RSpectra")
+library("ComplexHeatmap")
+
+library(gridExtra)
+library(ggpubr)
+
+library(PMCMRplus)
+library(rstatix)
+library(Hmisc)
+library(scales)
+```
+
+
+## Loading data
+```{r loading }
+workdir4 <- "path to the folder that contains FlowJo-exported FACS MFI data in a .csv file"
+workdir5 <- "path to a folder to store images"
+
+MFI_import <- read.csv(paste0(workdir4,"the .csv file with MFI data"), header = TRUE, sep = ",")
+
+MFI_table <- MFI_import %>%
+  dplyr::select(- contains("X.1")) %>%
+  dplyr::select(File = X,
+                CD11b = Time..FSC.H.subset.Cells.of.Interest.Alive.Single.Cells.CD64..CD14.subset.CD16..CD11b.subset.FSC.A..SSC.A.subset...Median..Comp.BUV496.A....CD11b. ,
+                CD14 = Time..FSC.H.subset.Cells.of.Interest.Alive.Single.Cells.CD64..CD14.subset.CD16..CD11b.subset.FSC.A..SSC.A.subset...Median..Comp.APC.Fire.810.A....CD14. ,
+                CD16 = Time..FSC.H.subset.Cells.of.Interest.Alive.Single.Cells.CD64..CD14.subset.CD16..CD11b.subset.FSC.A..SSC.A.subset...Median..Comp.BUV805.A....CD16. ,
+                CD64 = Time..FSC.H.subset.Cells.of.Interest.Alive.Single.Cells.CD64..CD14.subset.CD16..CD11b.subset.FSC.A..SSC.A.subset...Median..Comp.APC.Fire.750.A....CD64. ,
+                CD80 = Time..FSC.H.subset.Cells.of.Interest.Alive.Single.Cells.CD64..CD14.subset.CD16..CD11b.subset.FSC.A..SSC.A.subset...Median..Comp.BUV661.A....CD80. ,
+                CD86 = Time..FSC.H.subset.Cells.of.Interest.Alive.Single.Cells.CD64..CD14.subset.CD16..CD11b.subset.FSC.A..SSC.A.subset...Median..Comp.BV650.A....CD86. ,
+                CD163 = Time..FSC.H.subset.Cells.of.Interest.Alive.Single.Cells.CD64..CD14.subset.CD16..CD11b.subset.FSC.A..SSC.A.subset...Median..Comp.BV785.A....CD163. ,
+                CD206 = Time..FSC.H.subset.Cells.of.Interest.Alive.Single.Cells.CD64..CD14.subset.CD16..CD11b.subset.FSC.A..SSC.A.subset...Median..Comp.BV605.A....CD206. ,
+                HLADR = Time..FSC.H.subset.Cells.of.Interest.Alive.Single.Cells.CD64..CD14.subset.CD16..CD11b.subset.FSC.A..SSC.A.subset...Median..Comp.BV570.A....HLADR. ,
+                LD = Time..FSC.H.subset.Cells.of.Interest.Alive.Single.Cells.CD64..CD14.subset.CD16..CD11b.subset.FSC.A..SSC.A.subset...Median..Comp.ViaDye.Red.A....LD.)%>% 
+  dplyr::mutate(condition = dplyr::case_when(
+    grepl("62_MT|274_MT|227_MT|Feb_MT|62_MG63|274_MG63|227_MG63",File) ~ "2day",
+    grepl("Mn|300_MT|300_MG63|781_MT|781_MG63|675_MT|675_MG63",File) ~ "8day",
+    grepl("noMCSF",File) ~ "noMCSF",
+    grepl("M1", File) ~ "M1",
+    grepl("M2",File) ~ "M2",
+    grepl("M0",File) ~ "M0",
+    TRUE ~ "Misc")) %>%
+  dplyr::mutate(experiment = dplyr::case_when(
+    grepl("MDD2019781",File) ~ "MDD2019781",
+    grepl("MDD2018675",File) ~ "MDD2018675",
+    grepl("MDD2017300",File) ~ "MDD2017300",
+    grepl("MDD2017274",File) ~ "MDD2017274",
+    grepl("MDD201762",File) ~ "MDD201762",
+    TRUE ~ "BC20240227")) %>%
+  dplyr::mutate(conditioned_medium = dplyr::case_when(
+    grepl("M0",File) ~ "M0",
+    grepl("M2",File) ~ "M2-like",
+    grepl("M1",File) ~ "M1-like", 
+    grepl("MG63",File) ~ "MG63",
+    grepl("SAOS",File) ~ "SAOS",
+    grepl("U2OS",File) ~ "U2OS",
+    grepl("CTR",File) ~ "CTR",
+    grepl("MSC",File) ~ "MSC")) %>%
+  dplyr::mutate(comparisons = dplyr::case_when(
+    grepl("MG63",File)&grepl("2day",condition) ~ "MG63 2day",
+    grepl("MG63",File)&grepl("8day",condition) ~ "MG63 8day",
+    grepl("MG63",File)&grepl("noMCSF",condition) ~ "MG63 noMCSF",
+    grepl("SAOS",File)&grepl("2day",condition) ~ "SAOS 2day",
+    grepl("SAOS",File)&grepl("8day",condition) ~ "SAOS 8day",
+    grepl("SAOS",File)&grepl("noMCSF",condition) ~ "SAOS noMCSF",
+    grepl("U2OS",File)&grepl("2day",condition) ~ "U2OS 2day",
+    grepl("U2OS",File)&grepl("8day",condition) ~ "U2OS 8day",
+    grepl("U2OS",File)&grepl("noMCSF",condition) ~ "U2OS noMCSF",
+    grepl("CTR",File)&grepl("2day",condition) ~ "CTR 2day",
+    grepl("CTR",File)&grepl("8day",condition) ~ "CTR 8day",
+    grepl("CTR",File)&grepl("noMCSF",condition) ~ "CTR noMCSF",
+    grepl("MSC",File)&grepl("2day",condition) ~ "MSC 2day",
+    grepl("MSC",File)&grepl("8day",condition) ~ "MSC 8day",
+    grepl("MSC",File)&grepl("noMCSF",condition) ~ "MSC noMCSF",
+    TRUE ~ "M012")) %>%  
+  dplyr::mutate(prot_conc = dplyr::case_when(
+    grepl("2ug",File)&grepl("U2OS",File) ~ "U2OS 24µg/mL",
+    grepl("_5ug",File)&grepl("U2OS",File) ~ "U2OS 60µg/mL",
+    grepl("10ug",File)&grepl("U2OS",File) ~ "U2OS 120µg/mL",
+    grepl("25ug",File)&grepl("U2OS",File) ~ "U2OS 300µg/mL",
+    grepl("25ug",File)&grepl("MSC",File) ~ "MSC 300µg/mL",
+    grepl("U2OS",File)&!grepl("2ug|_5ug|10ug|25ug",File) ~ "U2OS 622µg/mL",
+    grepl("MSC",File)&!grepl("2ug|_5ug|10ug|25ug",File) ~ "MSC 622µg/mL",
+    grepl("M1|M2|M0",File) ~ "M012",
+    grepl("MDD2017274|BC|BuffyCoat",File) ~ "not-levelled",
+    TRUE ~ "622µg/mL")) %>%
+  dplyr::mutate(lines_comp = dplyr::case_when(
+    grepl("MG63",File)&grepl("2day|8day|noMCSF",condition)&grepl("BC|BuffyCoat",File) ~ "MG63-CM BC",
+    grepl("SAOS",File)&grepl("2day|8day|noMCSF",condition)&grepl("BC|BuffyCoat",File) ~ "SAOS-CM BC",
+    grepl("U2OS",File)&grepl("2day|8day|noMCSF",condition)&grepl("BC|BuffyCoat",File) ~ "U2OS-CM BC",
+    grepl("MSC",File)&grepl("2day|8day|noMCSF",condition)&grepl("BC|BuffyCoat",File) ~ "MSC-CM BC",
+    grepl("CTR",File)&grepl("2day|8day|noMCSF",condition)&grepl("BC|BuffyCoat",File) ~ "CTR-CM BC",
+    grepl("MG63",File)&grepl("2day|8day|noMCSF",condition)&grepl("MDD2017274",File) ~ "MG63-CM MDD2017274",
+    grepl("SAOS",File)&grepl("2day|8day|noMCSF",condition)&grepl("MDD2017274",File) ~ "SAOS-CM MDD2017274",
+    grepl("U2OS",File)&grepl("2day|8day|noMCSF",condition)&grepl("MDD2017274",File) ~ "U2OS-CM MDD2017274",
+    grepl("MSC",File)&grepl("2day|8day|noMCSF",condition)&grepl("MDD2017274",File) ~ "MSC-CM MDD2017274",
+    grepl("CTR",File)&grepl("2day|8day|noMCSF",condition)&grepl("MDD2017274",File) ~ "CTR-CM MDD2017274",
+    TRUE ~ "M012")) %>%
+  dplyr::select(-contains("LD"))
+
+
+```
+
+
+## Subsetting data
+```{r subsets }
+# removing faulty experiments/conditions
+MFI_table <- MFI_table[!grepl("MDD201762", MFI_table$experiment),]
+MFI_table <- MFI_table[!grepl("BC20240227_Mn_SAOS|BC20240227_Mn_MSC", MFI_table$File),] 
+# remove unnecessary rows
+MFI_table <- MFI_table[!grepl("Mean|SD", MFI_table$File),] 
+# factor the data
+MFI_table <- MFI_table %>%
+  dplyr::mutate(experiment = factor(experiment, levels = c("MDD2017274", "BC20240227", "MDD2017300", "MDD2018675", "MDD2019781"))) %>% 
+  dplyr::mutate(conditioned_medium = factor(conditioned_medium, levels = c("M0", "M1-like", "M2-like", "CTR", "MSC", "U2OS", "SAOS","MG63"))) %>% 
+  dplyr::mutate(comparisons = factor(comparisons, levels = c("M012","CTR 2day", "CTR 8day", "CTR noMCSF", "MSC 2day", "MSC 8day", "MSC noMCSF","U2OS 2day", "U2OS 8day", "U2OS noMCSF","SAOS 2day", "SAOS 8day", "SAOS noMCSF","MG63 2day", "MG63 8day", "MG63 noMCSF"))) %>% 
+  dplyr::mutate(prot_conc = factor(prot_conc, levels = c("M012","not-levelled", "MSC 622µg/mL","MSC 300µg/mL", "U2OS 622µg/mL", "U2OS 300µg/mL", "U2OS 120µg/mL", "U2OS 60µg/mL","U2OS 24µg/mL", "622µg/mL")))
+
+
+
+# subsetting
+# M0-1-2-like
+MFI_table_M012 <- MFI_table[grepl("M1|M2|M0", MFI_table$condition),]
+
+# 2DAY comparison to 8DAY
+MFI_table_2day_vs_8day <- MFI_table[grepl("2day|8day", MFI_table$condition),]
+MFI_table_2day_vs_8day <- MFI_table_2day_vs_8day[grepl("MDD2017274|BC", MFI_table_2day_vs_8day$experiment),]
+
+# NOMCSF comparison to 8day MCSF
+MFI_table_noMCSF_vs_MCSF <- MFI_table[grepl("noMCSF|8day", MFI_table$condition),]
+MFI_table_noMCSF_vs_MCSF <- MFI_table_noMCSF_vs_MCSF[grepl("MDD2018|MDD2019|MDD2017300", MFI_table_noMCSF_vs_MCSF$experiment),]
+MFI_table_noMCSF_vs_MCSF <- MFI_table_noMCSF_vs_MCSF[!grepl("2ug|5ug|10ug|25ug", MFI_table_noMCSF_vs_MCSF$File),]
+
+# adding the reduced protein amount conditions.
+MFI_table_8day_reduced_protein <- MFI_table[grepl("8day", MFI_table$condition),] 
+MFI_table_8day_reduced_protein <- MFI_table_8day_reduced_protein[grepl("U2OS|MSC", MFI_table_8day_reduced_protein$conditioned_medium),] 
+MFI_table_8day_reduced_protein <- MFI_table_8day_reduced_protein[grepl("BC|MDD2017274|", MFI_table_8day_reduced_protein$File),] 
+
+# 8DAY comparison to M0-1-2-like 
+MFI_table_8day_vs_M012 <- MFI_table[grepl("8day|M1|M2|M0", MFI_table$condition),] 
+MFI_table_8day_vs_M012 <- MFI_table_8day_vs_M012[!grepl("2ug|5ug|10ug|25ug", MFI_table_8day_vs_M012$File),]
+
+
+
+
+# creating .CSV files 
+write.csv(MFI_table_2day_vs_8day, file = "MFI_table_2day_vs_8day.csv", row.names = FALSE)
+write.csv(MFI_table_8day_vs_M012, file = "MFI_table_8day_vs_M012.csv", row.names = FALSE)
+write.csv(MFI_table_8day_reduced_protein, file = "MFI_table_8day_reduced_protein.csv", row.names = FALSE)
+write.csv(MFI_table_noMCSF_vs_MCSF, file = "MFI_table_noMCSF_vs_MCSF.csv", row.names = FALSE)
+write.csv(MFI_table_M012, file = "MFI_table_M012.csv", row.names = FALSE)
+
+```
+
+
+# Analysis
+## M0-1-2-like macrophages
+```{r bargraph 1, warning = FALSE  }
+
+# Plot creation for adjustments
+ggplot(MFI_table_M012, 
+       aes(x = conditioned_medium, 
+           y = CD206, 
+           fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, 
+               fun.args = list(mult = 1), 
+               geom = "errorbar", 
+               width = 0.25, 
+               aes(ymax = after_stat(ymax), 
+                   ymin = ..ymin..), 
+               size = 0.4) + 
+  geom_bar(stat = "summary", 
+           fun = "mean", 
+           width = 0.7, 
+           show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), 
+                     labels = scales::scientific, 
+                     breaks = pretty_breaks(n = 6), 
+                     limits = c(0, max(MFI_table_M012$CD206)*(1.05))) +
+  scale_fill_manual(values = c("forestgreen",
+                               "steelblue4",
+                               "tomato4")) +
+  geom_point(size = 2, 
+             color = "black", 
+             show.legend = FALSE, 
+             aes(shape = experiment)) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, 
+                                   vjust = 1, 
+                                   hjust = 1, 
+                                   size = 14, 
+                                   face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, 
+                                  face = "bold", 
+                                  hjust = 0.5, 
+                                  vjust = 1),
+        axis.title.y = element_text(size = 10, 
+                                    face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity",
+       title = "CD206",
+       x = "")
+
+# conventional markers of M1- and M2-like macrophages
+MFI_boxplot_M012_specific_markers <- gridExtra::grid.arrange(
+ggplot(MFI_table_M012, aes(x = conditioned_medium, y = CD206, fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), size = 0.4) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 6), limits = c(0, max(MFI_table_M012$CD206)*(1.05))) +
+  scale_fill_manual(values = c("forestgreen","steelblue4","tomato4")) +
+  geom_point(size = 2, color = "black", show.legend = FALSE, aes(shape = experiment)) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 14, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "CD206", x = "")
+,
+ggplot(MFI_table_M012, aes(x = conditioned_medium, y = CD163, fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), size = 0.4) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 6), limits = c(0, max(MFI_table_M012$CD163)*(1.05))) +
+  scale_fill_manual(values = c("forestgreen","steelblue4","tomato4")) +
+  geom_point(size = 2, color = "black", show.legend = FALSE, aes(shape = experiment)) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 14, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "CD163", x = "")
+,
+ggplot(MFI_table_M012, aes(x = conditioned_medium, y = CD80, fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), size = 0.4) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 6), limits = c(0, max(MFI_table_M012$CD80)*(1.05))) +
+  scale_fill_manual(values = c("forestgreen","steelblue4","tomato4")) +
+  geom_point(size = 2, color = "black", show.legend = FALSE, aes(shape = experiment)) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 14, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "CD80", x = "")
+,
+ggplot(MFI_table_M012, aes(x = conditioned_medium, y = CD86, fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), size = 0.4) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 7), limits = c(0, max(MFI_table_M012$CD86)*(1.05))) +
+  scale_fill_manual(values = c("forestgreen","steelblue4","tomato4")) +
+  geom_point(size = 2, color = "black", show.legend = FALSE, aes(shape = experiment)) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 14, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "CD86", x = "")
+,
+ggplot(MFI_table_M012, aes(x = conditioned_medium, y = HLADR, fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), size = 0.4) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 6), limits = c(0, max(MFI_table_M012$HLADR)*(1.05))) +
+  scale_fill_manual(values = c("forestgreen","steelblue4","tomato4")) +
+  geom_point(size = 2, color = "black", show.legend = FALSE, aes(shape = experiment)) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 14, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "HLADR", x = "")
+,ncol = 5)
+
+# general macrophage markers
+MFI_boxplot_M012_general_markers <- gridExtra::grid.arrange(
+ggplot(MFI_table_M012, aes(x = conditioned_medium, y = CD11b, fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), size = 0.4) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 6), limits = c(0, max(MFI_table_M012$CD11b)*(1.05))) +
+  scale_fill_manual(values = c("forestgreen","steelblue4","tomato4")) +
+  geom_point(size = 2, color = "black", show.legend = FALSE, aes(shape = experiment)) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 12, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "CD11b", x = "")
+,
+ggplot(MFI_table_M012, aes(x = conditioned_medium, y = CD14, fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), size = 0.4) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 6), limits = c(0, max(MFI_table_M012$CD14)*(1.05))) +
+  scale_fill_manual(values = c("forestgreen","steelblue4","tomato4")) +
+  geom_point(size = 2, color = "black", show.legend = FALSE, aes(shape = experiment)) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 12, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "CD14", x = "")
+  ,
+ggplot(MFI_table_M012, aes(x = conditioned_medium, y = CD16, fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), size = 0.4) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 6), limits = c(0, max(MFI_table_M012$CD16)*(1.05))) +
+  scale_fill_manual(values = c("forestgreen","steelblue4","tomato4")) +
+  geom_point(size = 2, color = "black", show.legend = FALSE, aes(shape = experiment)) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 12, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "CD16", x = "")
+,
+ggplot(MFI_table_M012, aes(x = conditioned_medium, y = CD64, fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), size = 0.4) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 6), limits = c(0, max(MFI_table_M012$CD64)*(1.05))) +
+  scale_fill_manual(values = c("forestgreen","steelblue4","tomato4")) +
+  geom_point(size = 2, color = "black", show.legend = FALSE, aes(shape = experiment)) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 12, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "CD64", x = "")
+ ,ncol = 4)
+
+# saving plots
+ggsave(filename = "MFI_boxplot_M012_expression_specific_markers.png", plot = MFI_boxplot_M012_specific_markers , width = 16 , height = 4 , path = workdir5, dpi = 600)
+ggsave(filename = "MFI_boxplot_M012_expression_general_markers.png", plot = MFI_boxplot_M012_general_markers , width = 12.8 , height = 4 , path = workdir5, dpi = 600)
+
+# Plot with legend applicable to all and saving plot
+MFI_boxplot_M012_legend <- ggplot(MFI_table_M012, aes(x = conditioned_medium, y = CD64, fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), size = 0.4) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 6), limits = c(0, max(MFI_table_M012$CD64)*(1.05))) +
+  scale_fill_manual(values = c("forestgreen","steelblue4","tomato4")) +
+  geom_point(size = 2, color = "black", show.legend = TRUE, aes(shape = experiment)) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 12, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "CD64", x = "")
+MFI_boxplot_M012_legend
+ggsave(filename = "MFI_boxplot_M012_legend.png", plot = MFI_boxplot_M012_legend, width = 3.2, height = 4, path = workdir5, dpi = 600)
+
+
+```
+
+
+
+
+## Comparing 2day vs 8day
+```{r bargraph 2}
+# Plot creation for adjustments
+ggplot(MFI_table_2day_vs_8day, aes(x = comparisons, y = CD206, fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), size = 0.4) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 6), limits = c(0, max(MFI_table_2day_vs_8day$CD206)*(1.3))) +
+  scale_fill_manual(values = c("darkgray","azure4","gold2","goldenrod3","orange2")) +
+  geom_point(size = 2, color = "black", show.legend = FALSE, aes(shape = experiment)) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 10, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "CD206", x = "")
+
+
+
+
+# conventional markers of M1- and M2-like macrophages
+MFI_boxplot_2day_vs_8day_specific_markers <- gridExtra::grid.arrange(
+ggplot(MFI_table_2day_vs_8day, aes(x = comparisons, y = CD206, fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), size = 0.4 ) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 6), limits = c(0, max(MFI_table_2day_vs_8day$CD206)*(1.3))) +
+  scale_fill_manual(values = c("darkgray","azure4","gold2","goldenrod3","orange2")) +
+  geom_point(size = 2, color = "black", show.legend = FALSE, aes(shape = experiment)) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 10, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "CD206", x = "")
+  ,
+ggplot(MFI_table_2day_vs_8day, aes(x = comparisons, y = CD163, fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), size = 0.4 ) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 5), limits = c(0, max(MFI_table_2day_vs_8day$CD163)*(1.15))) +
+  scale_fill_manual(values = c("darkgray","azure4","gold2","goldenrod3","orange2")) +
+  geom_point(size = 2, color = "black", show.legend = FALSE, aes(shape = experiment)) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 10, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "CD163", x = "")
+,
+ggplot(MFI_table_2day_vs_8day, aes(x = comparisons, y = CD80, fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), size = 0.4 ) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 5), limits = c(0, max(MFI_table_2day_vs_8day$CD80)*(1.15))) +
+  scale_fill_manual(values = c("darkgray","azure4","gold2","goldenrod3","orange2")) +
+  geom_point(size = 2, color = "black", show.legend = FALSE, aes(shape = experiment)) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic()+
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 10, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "CD80", x = "")
+,
+ggplot(MFI_table_2day_vs_8day, aes(x = comparisons, y = CD86, fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), size = 0.4 ) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 5), limits = c(0, max(MFI_table_2day_vs_8day$CD86)*(1.15))) +
+  scale_fill_manual(values = c("darkgray","azure4","gold2","goldenrod3","orange2")) +
+  geom_point(size = 2, color = "black", show.legend = FALSE, aes(shape = experiment)) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 10, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "CD86", x = "")
+,
+ggplot(MFI_table_2day_vs_8day, aes(x = comparisons, y = HLADR, fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), size = 0.4 ) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 5), limits = c(0, max(MFI_table_2day_vs_8day$HLADR)*(1.15))) +
+  scale_fill_manual(values = c("darkgray","azure4","gold2","goldenrod3","orange2")) +
+  geom_point(size = 2, color = "black", show.legend = FALSE, aes(shape = experiment)) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 10, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "HLADR", x = "")
+,ncol = 5)
+
+
+# general macrophage markers
+MFI_boxplot_2day_vs_8day_general_markers <- gridExtra::grid.arrange(
+ggplot(MFI_table_2day_vs_8day, aes(x = comparisons, y = CD11b, fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), size = 0.4 ) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 5), limits = c(0, max(MFI_table_2day_vs_8day$CD11b)*(1.15))) +
+  scale_fill_manual(values = c("darkgray","azure4","gold2","goldenrod3","orange2")) +
+  geom_point(size = 2, color = "black", show.legend = FALSE, aes(shape = experiment)) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 10, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "CD11b", x = "")
+,
+ggplot(MFI_table_2day_vs_8day, aes(x = comparisons, y = CD14, fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), size = 0.4 ) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 5), limits = c(0, max(MFI_table_2day_vs_8day$CD14)*(1.15))) +
+  scale_fill_manual(values = c("darkgray","azure4","gold2","goldenrod3","orange2")) +
+  geom_point(size = 2, color = "black", show.legend = FALSE, aes(shape = experiment)) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 10, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "CD14", x = "")
+,
+ggplot(MFI_table_2day_vs_8day, aes(x = comparisons, y = CD16, fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), size = 0.4 ) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 4), limits = c(0, max(MFI_table_2day_vs_8day$CD16)*(1.15))) +
+  scale_fill_manual(values = c("darkgray","azure4","gold2","goldenrod3","orange2")) +
+  geom_point(size = 2, color = "black", show.legend = FALSE, aes(shape = experiment)) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 10, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "CD16", x = "")
+,
+ggplot(MFI_table_2day_vs_8day, aes(x = comparisons, y = CD64, fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), size = 0.4 ) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 5), limits = c(0, max(MFI_table_2day_vs_8day$CD64)*(1.15))) +
+  scale_fill_manual(values = c("darkgray","azure4","gold2","goldenrod3","orange2")) +
+  geom_point(size = 2, color = "black", show.legend = FALSE, aes(shape = experiment)) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 10, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "CD64", x = "")
+,ncol = 4)
+
+
+# saving plots
+ggsave(filename = "MFI_boxplot_2day_vs_8day_specific_markers.png", plot = MFI_boxplot_2day_vs_8day_specific_markers , width = 16 , height = 4 , path = workdir5, dpi = 600)
+ggsave(filename = "MFI_boxplot_2day_vs_8day_general_markers.png", plot = MFI_boxplot_2day_vs_8day_general_markers , width = 12.8 , height = 4 , path = workdir5, dpi = 600)
+
+
+
+# Plot with legend applicable to all and saving plot
+MFI_boxplot_2day_vs_8day_legend <- ggplot(MFI_table_2day_vs_8day, aes(x = comparisons, y = CD14, fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), size = 0.4 ) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 5), limits = c(0, max(MFI_table_2day_vs_8day$CD14)*(1.15))) +
+  scale_fill_manual(values = c("darkgray","azure4","gold2","goldenrod3","orange2")) +
+  geom_point(size = 2, color = "black", show.legend = TRUE, aes(shape = experiment)) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 10, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "CD14", x = "")
+
+MFI_boxplot_2day_vs_8day_legend
+
+ggsave(filename = "MFI_boxplot_2day_vs_8day_legend.png", plot = MFI_boxplot_2day_vs_8day_legend, width = 3.2, height = 4, path = workdir5, dpi = 600)
+
+```
+
+
+
+
+## Comparing MCSF vs noMCSF
+```{r bargraph 3, warning = FALSE  }
+# Plot creation for adjustments
+ggplot(MFI_table_noMCSF_vs_MCSF, aes(x = comparisons, y = CD206, fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), linewidth = 0.4) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 5), limits = c(0, max(MFI_table_noMCSF_vs_MCSF$CD206)*(1.15))) +
+  geom_point(size = 2, color = "black", show.legend = FALSE, aes(shape = experiment)) +
+  scale_fill_manual(values = c("darkgray","azure4","gold2","goldenrod3","orange2")) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 10, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "CD206", x = "")
+
+
+
+# conventional markers of M1- and M2-like macrophages
+MFI_boxplot_noMCSF_vs_MCSF_specific_markers <- gridExtra::grid.arrange(
+ggplot(MFI_table_noMCSF_vs_MCSF, aes(x = comparisons, y = CD206, fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), size = 0.4) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 5), limits = c(0, max(MFI_table_noMCSF_vs_MCSF$CD206)*(1.1))) +
+  geom_point(size = 2, color = "black", show.legend = FALSE, aes(shape = experiment)) +
+  scale_fill_manual(values = c("darkgray","azure4","gold2","goldenrod3","orange2")) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 10, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "CD206", x = "")
+,
+ggplot(MFI_table_noMCSF_vs_MCSF, aes(x = comparisons, y = CD163, fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), size = 0.4) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 5), limits = c(0, max(MFI_table_noMCSF_vs_MCSF$CD163)*(1.15))) +
+  geom_point(size = 2, color = "black", show.legend = FALSE, aes(shape = experiment)) +
+  scale_fill_manual(values = c("darkgray","azure4","gold2","goldenrod3","orange2")) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 10, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "CD163", x = "")
+,
+ggplot(MFI_table_noMCSF_vs_MCSF, aes(x = comparisons, y = CD80, fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), size = 0.4) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 5), limits = c(0, max(MFI_table_noMCSF_vs_MCSF$CD80)*(1.15))) +
+  geom_point(size = 2, color = "black", show.legend = FALSE, aes(shape = experiment)) +
+  scale_fill_manual(values = c("darkgray","azure4","gold2","goldenrod3","orange2")) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 10, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "CD80", x = "")
+,
+ggplot(MFI_table_noMCSF_vs_MCSF, aes(x = comparisons, y = CD86, fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), size = 0.4) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 5), limits = c(0, max(MFI_table_noMCSF_vs_MCSF$CD86)*(1.15))) +
+  coord_cartesian(ylim = c(0, NA)) +
+  geom_point(size = 2, color = "black", show.legend = FALSE, aes(shape = experiment)) +
+  scale_fill_manual(values = c("darkgray","azure4","gold2","goldenrod3","orange2")) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 10, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "CD86", x = "")
+,
+ggplot(MFI_table_noMCSF_vs_MCSF, aes(x = comparisons, y = HLADR, fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), size = 0.4) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 5), limits = c(0, max(MFI_table_noMCSF_vs_MCSF$HLADR)*(1.15))) +
+  geom_point(size = 2, color = "black", show.legend = FALSE, aes(shape = experiment)) +
+  scale_fill_manual(values = c("darkgray","azure4","gold2","goldenrod3","orange2")) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 10, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "HLADR", x = "")
+,ncol = 5)
+
+
+# general macrophage markers
+MFI_boxplot_noMCSF_vs_MCSF_general_markers <- gridExtra::grid.arrange(
+ggplot(MFI_table_noMCSF_vs_MCSF, aes(x = comparisons, y = CD11b, fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), size = 0.4) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 5), limits = c(0, max(MFI_table_noMCSF_vs_MCSF$CD11b)*(1.15))) +
+  geom_point(size = 2, color = "black", show.legend = FALSE, aes(shape = experiment)) +
+  scale_fill_manual(values = c("darkgray","azure4","gold2","goldenrod3","orange2")) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 10, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "CD11b", x = "")
+,
+ggplot(MFI_table_noMCSF_vs_MCSF, aes(x = comparisons, y = CD14, fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), size = 0.4) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 5), limits = c(0, max(MFI_table_noMCSF_vs_MCSF$CD14)*(1.15))) +
+  geom_point(size = 2, color = "black", show.legend = FALSE, aes(shape = experiment)) +
+  scale_fill_manual(values = c("darkgray","azure4","gold2","goldenrod3","orange2")) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 10, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "CD14", x = "")
+,
+ggplot(MFI_table_noMCSF_vs_MCSF, aes(x = comparisons, y = CD16, fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), size = 0.4) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 5), limits = c(0, max(MFI_table_noMCSF_vs_MCSF$CD16)*(1.15))) +
+  geom_point(size = 2, color = "black", show.legend = FALSE, aes(shape = experiment)) +
+  scale_fill_manual(values = c("darkgray","azure4","gold2","goldenrod3","orange2")) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic()+
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 10, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "CD16", x = "")
+,
+ggplot(MFI_table_noMCSF_vs_MCSF, aes(x = comparisons, y = CD64, fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), size = 0.4) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 5), limits = c(0, max(MFI_table_noMCSF_vs_MCSF$CD64)*(1.15))) +
+  geom_point(size = 2, color = "black", show.legend = FALSE, aes(shape = experiment)) +
+  scale_fill_manual(values = c("darkgray","azure4","gold2","goldenrod3","orange2")) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 10, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "CD64", x = "")
+,ncol = 4)
+
+
+# saving plots
+ggsave(filename = "MFI_boxplot_noMCSF_vs_MCSF_specific_markers.png", plot = MFI_boxplot_noMCSF_vs_MCSF_specific_markers , width = 16 , height = 4 , path = workdir5, dpi = 600)
+ggsave(filename = "MFI_boxplot_noMCSF_vs_MCSF_general_markers.png", plot = MFI_boxplot_noMCSF_vs_MCSF_general_markers , width = 12.8 , height = 4 , path = workdir5, dpi = 600)
+
+
+# Plot with legend applicable to all and saving plot
+MFI_boxplot_noMCSF_vs_MCSF_legend <- ggplot(MFI_table_noMCSF_vs_MCSF, aes(x = comparisons, y = CD64, fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), size = 0.4) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 5), limits = c(0, max(MFI_table_noMCSF_vs_MCSF$CD64)*(1.15))) +
+  geom_point(size = 2, color = "black", show.legend = TRUE, aes(shape = experiment)) +
+  scale_fill_manual(values = c("darkgray","azure4","gold2","goldenrod3","orange2")) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 10, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "CD64", x = "")
+MFI_boxplot_noMCSF_vs_MCSF_legend
+
+ggsave(filename = "MFI_boxplot_noMCSF_vs_MCSF_legend.png", plot = MFI_boxplot_noMCSF_vs_MCSF_legend, width = 3.2, height = 4, path = workdir5, dpi = 600)
+
+```
+
+
+
+
+## Comparing reduced protein concentrations
+```{r bargraph 4}
+# Plot creation for adjustments
+ggplot(MFI_table_8day_reduced_protein, aes(x = prot_conc, y = CD206, fill = prot_conc)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), size = 0.4) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 5), limits = c(0, max(MFI_table_8day_reduced_protein$CD206)*(1.15))) +
+  geom_point(size = 2, color = "black", show.legend = FALSE, aes(shape = experiment)) +
+  scale_fill_manual(values = c("azure3","azure4","khaki","lightgoldenrod","goldenrod1","gold1","gold2")) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 9, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "CD206", x = "")
+
+
+
+# conventional markers of M1- and M2-like macrophages
+MFI_boxplot_8day_reduced_protein_specific_markers <- gridExtra::grid.arrange(
+ggplot(MFI_table_8day_reduced_protein, aes(x = prot_conc, y = CD206, fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), size = 0.4) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 5), limits = c(0, max(MFI_table_8day_reduced_protein$CD206)*(1.15))) +
+  geom_point(size = 2, color = "black", show.legend = FALSE, aes(shape = experiment)) +
+  scale_fill_manual(values = c("azure4","gold2")) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 9, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "CD206", x = "")
+,
+ggplot(MFI_table_8day_reduced_protein, aes(x = prot_conc, y = CD163, fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), size = 0.4) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 5), limits = c(0, max(MFI_table_8day_reduced_protein$CD163)*(1.15))) +
+  geom_point(size = 2, color = "black", show.legend = FALSE, aes(shape = experiment)) +
+  scale_fill_manual(values = c("azure4","gold2")) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 9, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "CD163", x = "")
+,
+ggplot(MFI_table_8day_reduced_protein, aes(x = prot_conc, y = CD80, fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), size = 0.4) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 5), limits = c(0, max(MFI_table_8day_reduced_protein$CD80)*(1.15))) +
+  geom_point(size = 2, color = "black", show.legend = FALSE, aes(shape = experiment)) +
+  scale_fill_manual(values = c("azure4","gold2")) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 9, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "CD80", x = "")
+,
+ggplot(MFI_table_8day_reduced_protein, aes(x = prot_conc, y = CD86, fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), size = 0.4) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 5), limits = c(0, max(MFI_table_8day_reduced_protein$CD86)*(1.15))) +
+  geom_point(size = 2, color = "black", show.legend = FALSE, aes(shape = experiment)) +
+  scale_fill_manual(values = c("azure4","gold2")) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 9, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "CD86", x = "")
+,
+ggplot(MFI_table_8day_reduced_protein, aes(x = prot_conc, y = HLADR, fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), size = 0.4) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 5), limits = c(0, max(MFI_table_8day_reduced_protein$HLADR)*(1.15))) +
+  geom_point(size = 2, color = "black", show.legend = FALSE, aes(shape = experiment)) +
+  scale_fill_manual(values = c("azure4","gold2")) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 9, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "HLADR", x = "")
+,ncol = 5)
+
+
+# general macrophage markers
+MFI_boxplot_8day_reduced_protein_general_markers <- gridExtra::grid.arrange(
+ggplot(MFI_table_8day_reduced_protein, aes(x = prot_conc, y = CD11b, fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), size = 0.4) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 5), limits = c(0, max(MFI_table_8day_reduced_protein$CD11b)*(1.15))) +
+  geom_point(size = 2, color = "black", show.legend = FALSE, aes(shape = experiment)) +
+  scale_fill_manual(values = c("azure4","gold2")) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 9, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "CD11b", x = "")
+,
+ggplot(MFI_table_8day_reduced_protein, aes(x = prot_conc, y = CD14, fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), size = 0.4) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 5), limits = c(0, max(MFI_table_8day_reduced_protein$CD14)*(1.15))) +
+  geom_point(size = 2, color = "black", show.legend = FALSE, aes(shape = experiment)) +
+  scale_fill_manual(values = c("azure4","gold2")) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 9, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "CD14", x = "")
+,
+ggplot(MFI_table_8day_reduced_protein, aes(x = prot_conc, y = CD16, fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), size = 0.4) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 5), limits = c(0, max(MFI_table_8day_reduced_protein$CD16)*(1.15))) +
+  geom_point(size = 2, color = "black", show.legend = FALSE, aes(shape = experiment)) +
+  scale_fill_manual(values = c("azure4","gold2")) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 9, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "CD16", x = "")
+,
+ggplot(MFI_table_8day_reduced_protein, aes(x = prot_conc, y = CD64, fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), size = 0.4) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 5), limits = c(0, max(MFI_table_8day_reduced_protein$CD64)*(1.15))) +
+  geom_point(size = 2, color = "black", show.legend = FALSE, aes(shape = experiment)) +
+  scale_fill_manual(values = c("azure4","gold2")) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 9, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "CD64", x = "")
+,ncol = 4)
+
+# saving plots
+ggsave(filename = "MFI_boxplot_8day_reduced_protein_specific_markers.png", plot = MFI_boxplot_8day_reduced_protein_specific_markers , width = 16 , height = 4 , path = workdir5, dpi = 600)
+ggsave(filename = "MFI_boxplot_8day_reduced_protein_general_markers.png", plot = MFI_boxplot_8day_reduced_protein_general_markers , width = 12.8 , height = 4 , path = workdir5, dpi = 600)
+
+# Plot with legend applicable to all and saving plot
+MFI_boxplot_8day_reduced_protein_legend <- ggplot(MFI_table_8day_reduced_protein, aes(x = prot_conc, y = CD64, fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), size = 0.4) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 5), limits = c(0, max(MFI_table_8day_reduced_protein$CD64)*(1.15))) +
+  geom_point(size = 2, color = "black", show.legend = TRUE, aes(shape = experiment)) +
+  scale_fill_manual(values = c("azure4","gold2")) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 9, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "CD64", x = "")
+MFI_boxplot_8day_reduced_protein_legend
+
+ggsave(filename = "MFI_boxplot_8day_reduced_protein_legend.png", plot = MFI_boxplot_8day_reduced_protein_legend, width = 3.2, height = 4, path = workdir5, dpi = 600)
+
+```
+
+
+
+## Comparing 8day vs M0-1-2-like
+```{r bargraph 5}
+# Plot creation for adjustments
+ggplot(MFI_table_8day_vs_M012, aes(x = conditioned_medium, y = CD206, fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), size = 0.4) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 6) , limits = c(0, max(MFI_table_8day_vs_M012$CD206)*(1.05))) +
+  scale_fill_manual(values = c("forestgreen","steelblue4","tomato4","darkgray","azure4","gold2","goldenrod","orange2")) +
+  geom_point(size = 2, color = "black", show.legend = FALSE, aes(shape = experiment)) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 10, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "CD206", x = "")
+
+
+# conventional markers of M1- and M2-like macrophages
+MFI_boxplot_8day_vs_M012_specific_markers <- gridExtra::grid.arrange(
+ggplot(MFI_table_8day_vs_M012, aes(x = conditioned_medium, y = CD206, fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), size = 0.4) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 6), limits = c(0, max(MFI_table_8day_vs_M012$CD206)*(1.05))) +
+  scale_fill_manual(values = c("forestgreen","steelblue4","tomato4","darkgray","azure4","gold2","goldenrod","orange2")) +
+  geom_point(size = 2, color = "black", show.legend = FALSE, aes(shape = experiment)) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 10, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "CD206", x = "")
+,
+ggplot(MFI_table_8day_vs_M012, aes(x = conditioned_medium, y = CD163, fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), size = 0.4) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 6), limits = c(0, max(MFI_table_8day_vs_M012$CD163)*(1.05))) +
+  scale_fill_manual(values = c("forestgreen","steelblue4","tomato4","darkgray","azure4","gold2","goldenrod","orange2")) +
+  geom_point(size = 2, color = "black", show.legend = FALSE, aes(shape = experiment)) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 10, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "CD163", x = "")
+,
+ggplot(MFI_table_8day_vs_M012, aes(x = conditioned_medium, y = CD80, fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), size = 0.4) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 6), limits = c(0, max(MFI_table_8day_vs_M012$CD80)*(1.05))) +
+  scale_fill_manual(values = c("forestgreen","steelblue4","tomato4","darkgray","azure4","gold2","goldenrod","orange2")) +
+  geom_point(size = 2, color = "black", show.legend = FALSE, aes(shape = experiment)) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 10, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "CD80", x = "")
+,
+ggplot(MFI_table_8day_vs_M012, aes(x = conditioned_medium, y = CD86, fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), size = 0.4) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 6), limits = c(0, max(MFI_table_8day_vs_M012$CD86)*(1.05))) +
+  scale_fill_manual(values = c("forestgreen","steelblue4","tomato4","darkgray","azure4","gold2","goldenrod","orange2")) +
+  geom_point(size = 2, color = "black", show.legend = FALSE, aes(shape = experiment)) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 10, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "CD86", x = "")
+,
+ggplot(MFI_table_8day_vs_M012, aes(x = conditioned_medium, y = HLADR, fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), size = 0.4) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 6), limits = c(0, max(MFI_table_8day_vs_M012$HLADR)*(1.05))) +
+  scale_fill_manual(values = c("forestgreen","steelblue4","tomato4","darkgray","azure4","gold2","goldenrod","orange2")) +
+  geom_point(size = 2, color = "black", show.legend = FALSE, aes(shape = experiment)) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 10, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "HLADR", x = "")
+,ncol = 5)
+
+
+# general macrophage markers
+MFI_boxplot_8day_vs_M012_general_markers <- gridExtra::grid.arrange(
+ggplot(MFI_table_8day_vs_M012, aes(x = conditioned_medium, y = CD11b, fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), size = 0.4) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 6), limits = c(0, max(MFI_table_8day_vs_M012$CD11b)*(1.05))) +
+  scale_fill_manual(values = c("forestgreen","steelblue4","tomato4","darkgray","azure4","gold2","goldenrod","orange2")) +
+  geom_point(size = 2, color = "black", show.legend = FALSE, aes(shape = experiment)) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 10, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "CD11b", x = "")
+,
+ggplot(MFI_table_8day_vs_M012, aes(x = conditioned_medium, y = CD14, fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), size = 0.4) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 6), limits = c(0, max(MFI_table_8day_vs_M012$CD14)*(1.05))) +
+  scale_fill_manual(values = c("forestgreen","steelblue4","tomato4","darkgray","azure4","gold2","goldenrod","orange2")) +
+  geom_point(size = 2, color = "black", show.legend = FALSE, aes(shape = experiment)) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 10, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "CD14", x = "")
+,
+ggplot(MFI_table_8day_vs_M012, aes(x = conditioned_medium, y = CD16, fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), size = 0.4) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 6), limits = c(0, max(MFI_table_8day_vs_M012$CD16)*(1.05))) +
+  scale_fill_manual(values = c("forestgreen","steelblue4","tomato4","darkgray","azure4","gold2","goldenrod","orange2")) +
+  geom_point(size = 2, color = "black", show.legend = FALSE, aes(shape = experiment)) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 10, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "CD16", x = "")
+,
+ggplot(MFI_table_8day_vs_M012, aes(x = conditioned_medium, y = CD64, fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), size = 0.4) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 6), limits = c(0, max(MFI_table_8day_vs_M012$CD64)*(1.05))) +
+  scale_fill_manual(values = c("forestgreen","steelblue4","tomato4","darkgray","azure4","gold2","goldenrod","orange2")) +
+  geom_point(size = 2, color = "black", show.legend = FALSE, aes(shape = experiment)) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 10, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "CD64", x = "")
+
+,ncol = 4)
+
+# saving plots
+ggsave(filename = "MFI_boxplot_8day_vs_M012_specific_markers.png", plot = MFI_boxplot_8day_vs_M012_specific_markers , width = 16 , height = 4 , path = workdir5, dpi = 600)
+ggsave(filename = "MFI_boxplot_8day_vs_M012_general_markers.png", plot = MFI_boxplot_8day_vs_M012_general_markers , width = 12.8 , height = 4 , path = workdir5, dpi = 600)
+
+
+# Plot with legend applicable to all and saving plot
+MFI_boxplot_8day_vs_M012_legend <- ggplot(MFI_table_8day_vs_M012, aes(x = conditioned_medium, y = CD64, fill = conditioned_medium)) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", width = 0.25, aes(ymax = after_stat(ymax), ymin = ..ymin..), size = 0.4) + 
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, show.legend = FALSE) +
+  scale_y_continuous(expand = c(0, 0), labels = scales::scientific, breaks = pretty_breaks(n = 6), limits = c(0, max(MFI_table_8day_vs_M012$CD64)*(1.05))) +
+  scale_fill_manual(values = c("forestgreen","steelblue4","tomato4","darkgray","azure4","gold2","goldenrod","orange2")) +
+  geom_point(size = 2, color = "black", show.legend = TRUE, aes(shape = experiment)) +
+  scale_shape_manual(values = c(16, 17, 15, 4, 18)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 10, face = "bold"), 
+        plot.title.position = "plot",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5, vjust = 1),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  labs(y = "median fluorescence intensity", title = "CD64", x = "")
+
+MFI_boxplot_8day_vs_M012_legend
+
+ggsave(filename = "MFI_boxplot_8day_vs_M012_legend.png", plot = MFI_boxplot_8day_vs_M012_legend, width = 3.2, height = 6, path = workdir5, dpi = 600)
+
+
+
+```
+
+
