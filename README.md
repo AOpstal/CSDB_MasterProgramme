@@ -1,14 +1,14 @@
-# CSDB_MasterProgramme
-## This repository contains the R-scripts used to analyse and create the figures for my report.
+## CSDB_MasterProgramme
+This repository contains the R-scripts used to analyse and create the figures for my report.
 
-# 20241002_MFI_FACS_analysis:
+## 20241002_MFI_FACS_analysis:
 This script was created to perform Median Fluorescence Intensity analysis of 9 macrophage markers on monocyte-derived macrophages.
 It contains the code to create the boxplots of my report.
 M2-like macrophage markers: CD163, CD206.
 M1-like macrophage markers: CD80, CD86, HLADR.
 General macrophage markers: CD11b, CD14, CD16, CD64.
 
-# 20241002_Macrophages_FACS_Analysis
+## 20241002_Macrophages_FACS_Analysis
 This script was created to perform high parameter flow cytometry analysis to visualise the effect of all 9 markers combined.
 It contains the code to create the PCAs and UMAPs of my report.
 This script has been adapted from a tutorial from Vera Poort (van Boxtel group PMC) and Rico Hagelaar (van Boxtel group PMC). 
@@ -25,7 +25,7 @@ all created plots with colour were saved.
 
 
 
-
+## Reference
 1. Poort, V. M., Hagelaar, R., Roosmalen, M. J. van, Trabut, L., Buijs-Gladdines, J. G. C. A.
 M., Wijk, B. van, Meijerink, J. & Boxtel, R. van. (2024). Transient Differentiation-State
 Plasticity Occurs during Acute Lymphoblastic Leukemia Initiation. Cancer Research,
